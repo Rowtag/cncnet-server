@@ -73,6 +73,11 @@ Features:
 - Real-time log viewer
 - Maintenance mode per tunnel
 
+**External Access (Linux):** The server tries to bind to all interfaces automatically. If it falls back to localhost only, grant network capabilities:
+```bash
+sudo setcap 'cap_net_bind_service=+ep' /home/cncnet-server/cncnet-server
+```
+
 ## Installation
 
 ### Windows Service (PowerShell)
@@ -138,6 +143,7 @@ sudo ufw allow 50000/udp
 sudo ufw allow 50001/udp
 sudo ufw allow 3478/udp
 sudo ufw allow 8054/udp
+sudo ufw allow 1337/tcp   # Web dashboard (password protected)
 
 # View logs
 sudo journalctl -u cncnet-server -f

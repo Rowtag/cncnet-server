@@ -60,7 +60,6 @@ public sealed class StatusWebServer : IDisposable
         _startTime = DateTime.UtcNow;
 
         _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://localhost:{options.WebMonitor.Port}/");
         _listener.IgnoreWriteExceptions = true;
     }
 
@@ -68,8 +67,9 @@ public sealed class StatusWebServer : IDisposable
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
 
+        _listener.Prefixes.Add($"http://*:{_options.WebMonitor.Port}/");
         _listener.Start();
-        _logger.Information("Web monitor running on http://localhost:{Port}", _options.WebMonitor.Port);
+        _logger.Information("Web monitor running on port {Port} (all interfaces)", _options.WebMonitor.Port);
 
         while (!linkedCts.Token.IsCancellationRequested)
         {
