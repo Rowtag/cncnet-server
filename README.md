@@ -43,8 +43,6 @@ Options:
   --iplimit, -l <n>       Max clients per IP (V3) [default: 8, max: 40]
   --iplimitv2 <n>         Max requests per IP (V2) [default: 8, max: 40]
   --nomaster              Don't register to master server
-  --master <url>          Master server URL
-  --masterpw <pw>         Master server password
   --maintpw <pw>          Admin password (required for web dashboard)
   --nop2p                 Disable STUN servers
   --nostatus              Disable web dashboard
@@ -59,11 +57,8 @@ Options:
 ### Run from Console
 
 ```bash
-# Development/Testing (no master server)
+# Start server (without master server registration)
 dotnet run -- --name "My Server" --nomaster --maintpw "yourpassword"
-
-# Production with master server
-dotnet run -- --name "My Server" --masterpw "master_pw" --maintpw "admin_pw"
 ```
 
 ### Web Dashboard
@@ -88,7 +83,7 @@ Expand-Archive cncnet-server-win-x64.zip -DestinationPath C:\cncnet-server
 
 # Create service
 New-Service -Name CnCNetServer `
-  -BinaryPathName '"C:\cncnet-server\cncnet-server.exe" --name "MyServer" --masterpw "pw" --maintpw "admin"' `
+  -BinaryPathName '"C:\cncnet-server\cncnet-server.exe" --name "MyServer" --nomaster --maintpw "admin"' `
   -StartupType Automatic `
   -DisplayName "CnCNet Tunnel Server"
 
@@ -121,7 +116,7 @@ After=network.target
 Type=notify
 User=cncnet-server
 WorkingDirectory=/home/cncnet-server
-ExecStart=/home/cncnet-server/cncnet-server --name "MyServer" --masterpw "pw" --maintpw "admin"
+ExecStart=/home/cncnet-server/cncnet-server --name "MyServer" --nomaster --maintpw "admin"
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
