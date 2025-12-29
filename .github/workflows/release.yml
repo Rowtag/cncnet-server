@@ -46,15 +46,15 @@ jobs:
           dotnet-quality: 'preview'
 
       - name: Restore dependencies
-        run: dotnet restore cncnet-server.csproj
+        run: dotnet restore CnCNetServer.csproj
 
       - name: Publish V3 only
         run: |
-          dotnet publish cncnet-server.csproj -c Release -r ${{ matrix.rid }} -o publish/V3
+          dotnet publish CnCNetServer.csproj -c Release -r ${{ matrix.rid }} -o publish/V3
 
       - name: Publish V2+V3
         run: |
-          dotnet publish cncnet-server.csproj -c V2AndV3Release -r ${{ matrix.rid }} -o publish/V2+V3
+          dotnet publish CnCNetServer.csproj -c V2AndV3Release -r ${{ matrix.rid }} -o publish/V2+V3
 
       - name: Get version from tag
         id: version
