@@ -231,6 +231,3 @@ out/
 appsettings.*.json
 !appsettings.json
 !appsettings.Development.json
-
-# Claude Code
-.claude/
