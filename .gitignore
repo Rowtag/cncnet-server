@@ -204,3 +204,33 @@ FakesAssemblies/
 
 # Visual Studio 6 workspace options file
 *.opt
+
+# Application-specific
+logs/
+*.log
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Rider
+.idea/
+
+# JetBrains Rider
+*.sln.iml
+
+# Published output
+publish/
+out/
+
+# Local settings (may contain passwords)
+appsettings.*.json
+!appsettings.json
+!appsettings.Development.json
+
+# Claude Code
+.claude/

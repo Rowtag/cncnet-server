@@ -157,6 +157,14 @@ public sealed class StatusWebServer : IDisposable
             {
                 HandleUnblockRequest(path, response);
             }
+            else if (path.StartsWith("/setloglevel/", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleSetLogLevelRequest(path, response);
+            }
+            else if (path.StartsWith("/setloglimit/", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleSetLogLimitRequest(path, response);
+            }
             else
             {
                 await SendHtmlResponseAsync(response, requiresAuth);
@@ -514,6 +522,48 @@ public sealed class StatusWebServer : IDisposable
         }
     }
 
+    private void HandleSetLogLevelRequest(string path, HttpListenerResponse response)
+    {
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || !int.TryParse(parts[1], out var levelValue))
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        // Validate level is in valid range (0=Verbose to 4=Error)
+        if (levelValue < 0 || levelValue > 4)
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        InMemoryLogSink.Instance.DisplayLevel = (Serilog.Events.LogEventLevel)levelValue;
+        _logger.Information("[WEB] Log display level changed to {Level}", InMemoryLogSink.Instance.DisplayLevel);
+        response.StatusCode = 200;
+    }
+
+    private void HandleSetLogLimitRequest(string path, HttpListenerResponse response)
+    {
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || !int.TryParse(parts[1], out var limit))
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        // Validate limit is one of the allowed values
+        if (limit != 50 && limit != 100 && limit != 200 && limit != 500 && limit != 1000)
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        InMemoryLogSink.Instance.DisplayLimit = limit;
+        _logger.Information("[WEB] Log display limit changed to {Limit}", limit);
+        response.StatusCode = 200;
+    }
+
     #endregion
 
     #region Response Builders
@@ -593,7 +643,7 @@ public sealed class StatusWebServer : IDisposable
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <meta http-equiv="refresh" content="5">
+                <meta http-equiv="refresh" content="15">
                 <title>CnCNet Tunnel Server</title>
                 <style>
                     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -788,6 +838,41 @@ public sealed class StatusWebServer : IDisposable
                     }
                     .unblock-btn:hover {
                         background: #ff6666;
+                    }
+                    .log-level-select {
+                        padding: 6px 10px;
+                        border: 1px solid #0f3460;
+                        border-radius: 6px;
+                        background: #1a1a2e;
+                        color: #00d4ff;
+                        font-size: 13px;
+                        cursor: pointer;
+                    }
+                    .log-level-select:focus {
+                        outline: none;
+                        border-color: #00d4ff;
+                    }
+                    .log-header {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        margin-bottom: 15px;
+                        padding-bottom: 10px;
+                        border-bottom: 1px solid #0f3460;
+                    }
+                    .log-header h2 {
+                        margin-bottom: 0;
+                        padding-bottom: 0;
+                        border-bottom: none;
+                    }
+                    .log-controls {
+                        display: flex;
+                        gap: 10px;
+                        align-items: center;
+                    }
+                    .log-controls label {
+                        color: #888;
+                        font-size: 12px;
                     }
                     .maint-btn {
                         padding: 6px 12px;
@@ -1011,11 +1096,42 @@ public sealed class StatusWebServer : IDisposable
         }
         sb.AppendLine("    </div>");
 
-        // Log Messages Card (spans 3 columns)
+        // Log Messages Card (spans 3 columns) with level and limit dropdowns
         var logEntries = InMemoryLogSink.Instance.GetEntries().ToList();
+        var currentLogLevel = (int)InMemoryLogSink.Instance.DisplayLevel;
+        var currentLogLimit = InMemoryLogSink.Instance.DisplayLimit;
+
         sb.AppendLine("""
                 <div class="card log-card">
-                    <h2>&#128196; Recent Log Messages (last 50)</h2>
+                    <div class="log-header">
+                        <h2>&#128196; Log Messages</h2>
+                        <div class="log-controls">
+                            <label>Level:</label>
+                            <select class="log-level-select" onchange="setLogLevel(this.value)">
+            """);
+
+        foreach (var (name, value) in InMemoryLogSink.GetAvailableLevels())
+        {
+            var selected = value == currentLogLevel ? "selected" : "";
+            sb.AppendLine($"                                <option value=\"{value}\" {selected}>{name}</option>");
+        }
+
+        sb.AppendLine("""
+                            </select>
+                            <label>Show:</label>
+                            <select class="log-level-select" onchange="setLogLimit(this.value)">
+            """);
+
+        foreach (var limit in InMemoryLogSink.GetAvailableLimits())
+        {
+            var selected = limit == currentLogLimit ? "selected" : "";
+            sb.AppendLine($"                                <option value=\"{limit}\" {selected}>{limit}</option>");
+        }
+
+        sb.AppendLine("""
+                            </select>
+                        </div>
+                    </div>
                     <div class="log-container">
             """);
 
@@ -1044,7 +1160,7 @@ public sealed class StatusWebServer : IDisposable
         // Footer with signature and JavaScript
         sb.AppendLine("        </div>");
         sb.AppendLine("        <div class=\"footer\">");
-        sb.AppendLine("            CnCNet Tunnel Server v4.0 | Auto-refresh every 5 seconds");
+        sb.AppendLine("            CnCNet Tunnel Server v4.0 | Auto-refresh every 15 seconds");
         sb.AppendLine("            <div class=\"signature\">made with love by Rowtag</div>");
         sb.AppendLine("        </div>");
         sb.AppendLine("        <script>");
@@ -1053,6 +1169,8 @@ public sealed class StatusWebServer : IDisposable
         sb.AppendLine("            function setLimit(tunnel, value) { fetch('/setlimit/' + tunnel + '/' + value).then(r => { if (!r.ok) alert('Set limit failed'); }); }");
         sb.AppendLine("            function setBlacklistDuration(hours) { fetch('/setblacklistduration/' + hours).then(r => { if (!r.ok) alert('Set duration failed'); }); }");
         sb.AppendLine("            function unblock(ip) { fetch('/unblock/' + ip).then(r => { if (!r.ok) alert('Unblock failed'); }); }");
+        sb.AppendLine("            function setLogLevel(level) { fetch('/setloglevel/' + level).then(r => { if (!r.ok) alert('Set log level failed'); }); }");
+        sb.AppendLine("            function setLogLimit(limit) { fetch('/setloglimit/' + limit).then(r => { if (!r.ok) alert('Set log limit failed'); }); }");
         sb.AppendLine("        </script>");
         sb.AppendLine("    </body>");
         sb.AppendLine("</html>");
