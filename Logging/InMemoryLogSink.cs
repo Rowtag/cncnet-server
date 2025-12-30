@@ -28,6 +28,11 @@ public sealed class InMemoryLogSink : ILogEventSink
     /// </summary>
     public int DisplayLimit { get; set; } = 50;
 
+    /// <summary>
+    /// Current view mode for the log panel (logs, v3sessions, v2sessions).
+    /// </summary>
+    public string DisplayView { get; set; } = "logs";
+
     public InMemoryLogSink(int maxEntries = 1000)
     {
         _maxEntries = maxEntries;
