@@ -6,19 +6,17 @@ namespace CnCNetServer.Logging;
 
 /// <summary>
 /// In-memory log sink that keeps recent log entries for display in the web dashboard.
-/// Thread-safe for concurrent access. Entries expire after a short time to save memory.
+/// Thread-safe for concurrent access. Old entries are removed when max count is reached.
 /// </summary>
 public sealed class InMemoryLogSink : ILogEventSink
 {
     private readonly ConcurrentQueue<LogEntry> _entries = new();
     private readonly int _maxEntries;
-    private readonly TimeSpan _entryTtl;
-    private DateTime _lastCleanup = DateTime.UtcNow;
 
     /// <summary>
-    /// Singleton instance for global access.
+    /// Singleton instance for global access (1000 entries max).
     /// </summary>
-    public static InMemoryLogSink Instance { get; } = new(1000, TimeSpan.FromMinutes(5));
+    public static InMemoryLogSink Instance { get; } = new(1000);
 
     /// <summary>
     /// Current display filter level. Entries below this level are hidden (not deleted).
@@ -30,10 +28,9 @@ public sealed class InMemoryLogSink : ILogEventSink
     /// </summary>
     public int DisplayLimit { get; set; } = 50;
 
-    public InMemoryLogSink(int maxEntries = 50, TimeSpan? entryTtl = null)
+    public InMemoryLogSink(int maxEntries = 1000)
     {
         _maxEntries = maxEntries;
-        _entryTtl = entryTtl ?? TimeSpan.FromMinutes(5);
     }
 
     public void Emit(LogEvent logEvent)
@@ -50,35 +47,7 @@ public sealed class InMemoryLogSink : ILogEventSink
 
         _entries.Enqueue(entry);
 
-        // Cleanup: remove old entries and enforce max count
-        CleanupIfNeeded();
-    }
-
-    private void CleanupIfNeeded()
-    {
-        var now = DateTime.UtcNow;
-
-        // Only cleanup every 10 seconds to reduce overhead
-        if ((now - _lastCleanup).TotalSeconds < 10)
-        {
-            // Still enforce max count
-            while (_entries.Count > _maxEntries)
-            {
-                _entries.TryDequeue(out _);
-            }
-            return;
-        }
-
-        _lastCleanup = now;
-        var cutoff = now - _entryTtl;
-
-        // Remove expired entries
-        while (_entries.TryPeek(out var oldest) && oldest.TimestampUtc < cutoff)
-        {
-            _entries.TryDequeue(out _);
-        }
-
-        // Enforce max count
+        // Remove oldest entries when max count is exceeded
         while (_entries.Count > _maxEntries)
         {
             _entries.TryDequeue(out _);
