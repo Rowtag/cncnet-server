@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using CnCNetServer.Configuration;
+using CnCNetServer.Logging;
 using CnCNetServer.Models;
 using CnCNetServer.Security;
 using Serilog;
@@ -579,6 +580,14 @@ public sealed class TunnelV2 : IDisposable
                 if (client.IsTimedOut)
                 {
                     expiredIds.Add(id);
+
+                    // Log completed session if client had an endpoint (was actually used)
+                    if (client.RemoteEndPoint != null)
+                    {
+                        SessionLog.V2.LogSession(
+                            client.RemoteEndPoint.Address.ToString(),
+                            client.SessionDuration);
+                    }
                 }
             }
 
