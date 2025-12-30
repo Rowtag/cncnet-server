@@ -212,6 +212,10 @@ public sealed class StatusWebServer : IDisposable
             {
                 HandleSetSessionLimitRequest(path, response);
             }
+            else if (path.StartsWith("/setview/", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleSetViewRequest(path, response);
+            }
             else
             {
                 await SendHtmlResponseAsync(response, requiresAuth);
@@ -743,6 +747,28 @@ public sealed class StatusWebServer : IDisposable
         }
 
         _logger.Information("[WEB] {Tunnel} session display limit changed to {Limit}", tunnel.ToUpper(), limit);
+        response.StatusCode = 200;
+    }
+
+    private void HandleSetViewRequest(string path, HttpListenerResponse response)
+    {
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        var view = parts[1].ToLowerInvariant();
+
+        // Validate view is one of the allowed values
+        if (view != "logs" && view != "v3sessions" && view != "v2sessions")
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        InMemoryLogSink.Instance.DisplayView = view;
         response.StatusCode = 200;
     }
 
@@ -1291,39 +1317,63 @@ public sealed class StatusWebServer : IDisposable
         }
         sb.AppendLine("    </div>");
 
-        // Session Log Cards (V3 and V2)
-        BuildSessionLogCard(sb, SessionLog.V3, "V3");
-        BuildSessionLogCard(sb, SessionLog.V2, "V2");
-
-        // Log Messages Card (spans 3 columns) with level and limit dropdowns
-        var logEntries = InMemoryLogSink.Instance.GetEntries().ToList();
+        // Unified Log/Sessions Card with View dropdown
+        var currentView = InMemoryLogSink.Instance.DisplayView;
         var currentLogLevel = (int)InMemoryLogSink.Instance.DisplayLevel;
         var currentLogLimit = InMemoryLogSink.Instance.DisplayLimit;
+        var v3SessionCount = SessionLog.V3.TotalCount;
+        var v2SessionCount = SessionLog.V2.TotalCount;
 
-        sb.AppendLine("""
+        // Determine title based on current view
+        var (viewTitle, viewIcon) = currentView switch
+        {
+            "v3sessions" => ($"V3 Sessions ({v3SessionCount})", "&#128101;"),
+            "v2sessions" => ($"V2 Sessions ({v2SessionCount})", "&#128101;"),
+            _ => ("Log Messages", "&#128196;")
+        };
+
+        sb.AppendLine($"""
                 <div class="card log-card">
                     <div class="log-header">
-                        <h2>&#128196; Log Messages</h2>
+                        <h2>{viewIcon} {viewTitle}</h2>
                         <div class="log-controls">
-                            <label>Level:</label>
-                            <select class="log-level-select" onchange="setLogLevel(this.value)">
+                            <label>View:</label>
+                            <select class="log-level-select" onchange="setView(this.value)">
+                                <option value="logs" {(currentView == "logs" ? "selected" : "")}>Logs</option>
+                                <option value="v3sessions" {(currentView == "v3sessions" ? "selected" : "")}>V3 Sessions ({v3SessionCount})</option>
+                                <option value="v2sessions" {(currentView == "v2sessions" ? "selected" : "")}>V2 Sessions ({v2SessionCount})</option>
+                            </select>
             """);
 
-        foreach (var (name, value) in InMemoryLogSink.GetAvailableLevels())
+        // Show Level dropdown only for logs view
+        if (currentView == "logs")
         {
-            var selected = value == currentLogLevel ? "selected" : "";
-            sb.AppendLine($"                                <option value=\"{value}\" {selected}>{name}</option>");
+            sb.AppendLine("""
+                            <label>Level:</label>
+                            <select class="log-level-select" onchange="setLogLevel(this.value)">
+                """);
+
+            foreach (var (name, value) in InMemoryLogSink.GetAvailableLevels())
+            {
+                var selected = value == currentLogLevel ? "selected" : "";
+                sb.AppendLine($"                                <option value=\"{value}\" {selected}>{name}</option>");
+            }
+
+            sb.AppendLine("                            </select>");
         }
 
+        // Show limit dropdown for all views
         sb.AppendLine("""
-                            </select>
                             <label>Show:</label>
-                            <select class="log-level-select" onchange="setLogLimit(this.value)">
+                            <select class="log-level-select" onchange="setDisplayLimit(this.value)">
             """);
 
         foreach (var limit in InMemoryLogSink.GetAvailableLimits())
         {
-            var selected = limit == currentLogLimit ? "selected" : "";
+            int currentLimit = currentView == "logs"
+                ? currentLogLimit
+                : (currentView == "v3sessions" ? SessionLog.V3.DisplayLimit : SessionLog.V2.DisplayLimit);
+            var selected = limit == currentLimit ? "selected" : "";
             sb.AppendLine($"                                <option value=\"{limit}\" {selected}>{limit}</option>");
         }
 
@@ -1334,22 +1384,51 @@ public sealed class StatusWebServer : IDisposable
                     <div class="log-container">
             """);
 
-        if (logEntries.Count == 0)
+        // Render content based on current view
+        if (currentView == "logs")
         {
-            sb.AppendLine("            <div class=\"log-entry\">No log entries yet</div>");
-        }
-        else
-        {
-            foreach (var entry in logEntries)
+            var logEntries = InMemoryLogSink.Instance.GetEntries().ToList();
+            if (logEntries.Count == 0)
             {
-                var escapedMessage = HttpUtility.HtmlEncode(entry.Message);
-                sb.AppendLine($"""
+                sb.AppendLine("            <div class=\"log-entry\">No log entries yet</div>");
+            }
+            else
+            {
+                foreach (var entry in logEntries)
+                {
+                    var escapedMessage = HttpUtility.HtmlEncode(entry.Message);
+                    sb.AppendLine($"""
                             <div class="log-entry">
                                 <span class="log-time">[{entry.Timestamp:HH:mm:ss}]</span>
                                 <span class="{entry.LevelClass}">[{entry.Level}]</span>
                                 {escapedMessage}
                             </div>
-                    """);
+                        """);
+                }
+            }
+        }
+        else
+        {
+            // Render session entries
+            var sessionLog = currentView == "v3sessions" ? SessionLog.V3 : SessionLog.V2;
+            var entries = sessionLog.GetEntries().ToList();
+
+            if (entries.Count == 0)
+            {
+                var tunnelName = currentView == "v3sessions" ? "V3" : "V2";
+                sb.AppendLine($"            <div class=\"log-entry\">No {tunnelName} sessions yet</div>");
+            }
+            else
+            {
+                foreach (var entry in entries)
+                {
+                    sb.AppendLine($"""
+                            <div class="session-entry">
+                                <span><span class="session-ip">{entry.IpAddress}</span></span>
+                                <span><span class="session-duration">{entry.DurationFormatted}</span> <span class="session-time">{entry.StartTime.ToLocalTime():HH:mm:ss}</span></span>
+                            </div>
+                        """);
+                }
             }
         }
 
@@ -1362,6 +1441,7 @@ public sealed class StatusWebServer : IDisposable
         sb.AppendLine("            CnCNet Tunnel Server v4.0 | Auto-refresh every 15 seconds");
         sb.AppendLine("            <div class=\"signature\">made with love by Rowtag</div>");
         sb.AppendLine("        </div>");
+        var currentViewForJs = InMemoryLogSink.Instance.DisplayView;
         sb.AppendLine("        <script>");
         sb.AppendLine("            function toggle(option) { fetch('/toggle/' + option).then(r => { if (!r.ok) alert('Toggle failed'); }); }");
         sb.AppendLine("            function toggleMaint(tunnel) { fetch('/maintenance/' + tunnel).then(r => { if (!r.ok) alert('Maintenance toggle failed'); }); }");
@@ -1371,6 +1451,13 @@ public sealed class StatusWebServer : IDisposable
         sb.AppendLine("            function setLogLevel(level) { fetch('/setloglevel/' + level).then(r => { if (r.ok) location.reload(); else alert('Set log level failed'); }); }");
         sb.AppendLine("            function setLogLimit(limit) { fetch('/setloglimit/' + limit).then(r => { if (r.ok) location.reload(); else alert('Set log limit failed'); }); }");
         sb.AppendLine("            function setSessionLimit(tunnel, limit) { fetch('/setsessionlimit/' + tunnel + '/' + limit).then(r => { if (r.ok) location.reload(); else alert('Set session limit failed'); }); }");
+        sb.AppendLine("            function setView(view) { fetch('/setview/' + view).then(r => { if (r.ok) location.reload(); else alert('Set view failed'); }); }");
+        sb.AppendLine($"            var currentView = '{currentViewForJs}';");
+        sb.AppendLine("            function setDisplayLimit(limit) {");
+        sb.AppendLine("                if (currentView === 'logs') { setLogLimit(limit); }");
+        sb.AppendLine("                else if (currentView === 'v3sessions') { setSessionLimit('v3', limit); }");
+        sb.AppendLine("                else if (currentView === 'v2sessions') { setSessionLimit('v2', limit); }");
+        sb.AppendLine("            }");
         sb.AppendLine("        </script>");
         sb.AppendLine("    </body>");
         sb.AppendLine("</html>");
@@ -1385,55 +1472,6 @@ public sealed class StatusWebServer : IDisposable
         if (uptime.TotalHours >= 1)
             return $"{uptime.Hours}h {uptime.Minutes}m {uptime.Seconds}s";
         return $"{uptime.Minutes}m {uptime.Seconds}s";
-    }
-
-    private static void BuildSessionLogCard(StringBuilder sb, SessionLog sessionLog, string tunnelName)
-    {
-        var entries = sessionLog.GetEntries().ToList();
-        var currentLimit = sessionLog.DisplayLimit;
-        var tunnelLower = tunnelName.ToLowerInvariant();
-
-        sb.AppendLine($"""
-                <div class="card">
-                    <div class="log-header">
-                        <h2>&#128101; {tunnelName} Sessions ({sessionLog.TotalCount})</h2>
-                        <div class="log-controls">
-                            <label>Show:</label>
-                            <select class="log-level-select" onchange="setSessionLimit('{tunnelLower}', this.value)">
-            """);
-
-        foreach (var limit in SessionLog.GetAvailableLimits())
-        {
-            var selected = limit == currentLimit ? "selected" : "";
-            sb.AppendLine($"                                <option value=\"{limit}\" {selected}>{limit}</option>");
-        }
-
-        sb.AppendLine("""
-                            </select>
-                        </div>
-                    </div>
-                    <div class="log-container">
-            """);
-
-        if (entries.Count == 0)
-        {
-            sb.AppendLine($"            <div class=\"log-entry\">No {tunnelName} sessions yet</div>");
-        }
-        else
-        {
-            foreach (var entry in entries)
-            {
-                sb.AppendLine($"""
-                            <div class="session-entry">
-                                <span><span class="session-ip">{entry.IpAddress}</span></span>
-                                <span><span class="session-duration">{entry.DurationFormatted}</span> <span class="session-time">{entry.StartTime.ToLocalTime():HH:mm:ss}</span></span>
-                            </div>
-                    """);
-            }
-        }
-
-        sb.AppendLine("        </div>");
-        sb.AppendLine("    </div>");
     }
 
     #endregion
