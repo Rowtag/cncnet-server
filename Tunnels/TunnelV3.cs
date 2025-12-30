@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using CnCNetServer.Configuration;
+using CnCNetServer.Logging;
 using CnCNetServer.Models;
 using CnCNetServer.Security;
 using Serilog;
@@ -428,10 +429,19 @@ public sealed class TunnelV3 : IDisposable
                 if (client.IsTimedOut)
                 {
                     expiredIds.Add(id);
-                    // Release connection tracking
-                    if (ddosEnabled && client.RemoteEndPoint != null)
+
+                    // Log completed session if client had an endpoint
+                    if (client.RemoteEndPoint != null)
                     {
-                        _securityManager.ReleaseConnection(client.RemoteEndPoint.Address);
+                        SessionLog.V3.LogSession(
+                            client.RemoteEndPoint.Address.ToString(),
+                            client.SessionDuration);
+
+                        // Release connection tracking
+                        if (ddosEnabled)
+                        {
+                            _securityManager.ReleaseConnection(client.RemoteEndPoint.Address);
+                        }
                     }
                 }
             }

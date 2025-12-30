@@ -165,6 +165,10 @@ public sealed class StatusWebServer : IDisposable
             {
                 HandleSetLogLimitRequest(path, response);
             }
+            else if (path.StartsWith("/setsessionlimit/", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleSetSessionLimitRequest(path, response);
+            }
             else
             {
                 await SendHtmlResponseAsync(response, requiresAuth);
@@ -564,6 +568,41 @@ public sealed class StatusWebServer : IDisposable
         response.StatusCode = 200;
     }
 
+    private void HandleSetSessionLimitRequest(string path, HttpListenerResponse response)
+    {
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3 || !int.TryParse(parts[2], out var limit))
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        var tunnel = parts[1].ToLowerInvariant();
+
+        // Validate limit is one of the allowed values
+        if (limit != 50 && limit != 100 && limit != 200 && limit != 500)
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        switch (tunnel)
+        {
+            case "v2":
+                SessionLog.V2.DisplayLimit = limit;
+                break;
+            case "v3":
+                SessionLog.V3.DisplayLimit = limit;
+                break;
+            default:
+                response.StatusCode = 400;
+                return;
+        }
+
+        _logger.Information("[WEB] {Tunnel} session display limit changed to {Limit}", tunnel.ToUpper(), limit);
+        response.StatusCode = 200;
+    }
+
     #endregion
 
     #region Response Builders
@@ -874,6 +913,19 @@ public sealed class StatusWebServer : IDisposable
                         color: #888;
                         font-size: 12px;
                     }
+                    .session-entry {
+                        display: flex;
+                        justify-content: space-between;
+                        padding: 4px 8px;
+                        border-bottom: 1px solid #1a1a2e;
+                        font-size: 12px;
+                    }
+                    .session-entry:hover {
+                        background: #1a1a2e;
+                    }
+                    .session-ip { color: #00d4ff; font-family: monospace; }
+                    .session-duration { color: #00ff88; }
+                    .session-time { color: #666; }
                     .maint-btn {
                         padding: 6px 12px;
                         border: 1px solid #0f3460;
@@ -1096,6 +1148,10 @@ public sealed class StatusWebServer : IDisposable
         }
         sb.AppendLine("    </div>");
 
+        // Session Log Cards (V3 and V2)
+        BuildSessionLogCard(sb, SessionLog.V3, "V3");
+        BuildSessionLogCard(sb, SessionLog.V2, "V2");
+
         // Log Messages Card (spans 3 columns) with level and limit dropdowns
         var logEntries = InMemoryLogSink.Instance.GetEntries().ToList();
         var currentLogLevel = (int)InMemoryLogSink.Instance.DisplayLevel;
@@ -1169,8 +1225,9 @@ public sealed class StatusWebServer : IDisposable
         sb.AppendLine("            function setLimit(tunnel, value) { fetch('/setlimit/' + tunnel + '/' + value).then(r => { if (!r.ok) alert('Set limit failed'); }); }");
         sb.AppendLine("            function setBlacklistDuration(hours) { fetch('/setblacklistduration/' + hours).then(r => { if (!r.ok) alert('Set duration failed'); }); }");
         sb.AppendLine("            function unblock(ip) { fetch('/unblock/' + ip).then(r => { if (!r.ok) alert('Unblock failed'); }); }");
-        sb.AppendLine("            function setLogLevel(level) { fetch('/setloglevel/' + level).then(r => { if (!r.ok) alert('Set log level failed'); }); }");
-        sb.AppendLine("            function setLogLimit(limit) { fetch('/setloglimit/' + limit).then(r => { if (!r.ok) alert('Set log limit failed'); }); }");
+        sb.AppendLine("            function setLogLevel(level) { fetch('/setloglevel/' + level).then(r => { if (r.ok) location.reload(); else alert('Set log level failed'); }); }");
+        sb.AppendLine("            function setLogLimit(limit) { fetch('/setloglimit/' + limit).then(r => { if (r.ok) location.reload(); else alert('Set log limit failed'); }); }");
+        sb.AppendLine("            function setSessionLimit(tunnel, limit) { fetch('/setsessionlimit/' + tunnel + '/' + limit).then(r => { if (r.ok) location.reload(); else alert('Set session limit failed'); }); }");
         sb.AppendLine("        </script>");
         sb.AppendLine("    </body>");
         sb.AppendLine("</html>");
@@ -1185,6 +1242,55 @@ public sealed class StatusWebServer : IDisposable
         if (uptime.TotalHours >= 1)
             return $"{uptime.Hours}h {uptime.Minutes}m {uptime.Seconds}s";
         return $"{uptime.Minutes}m {uptime.Seconds}s";
+    }
+
+    private static void BuildSessionLogCard(StringBuilder sb, SessionLog sessionLog, string tunnelName)
+    {
+        var entries = sessionLog.GetEntries().ToList();
+        var currentLimit = sessionLog.DisplayLimit;
+        var tunnelLower = tunnelName.ToLowerInvariant();
+
+        sb.AppendLine($"""
+                <div class="card">
+                    <div class="log-header">
+                        <h2>&#128101; {tunnelName} Sessions ({sessionLog.TotalCount})</h2>
+                        <div class="log-controls">
+                            <label>Show:</label>
+                            <select class="log-level-select" onchange="setSessionLimit('{tunnelLower}', this.value)">
+            """);
+
+        foreach (var limit in SessionLog.GetAvailableLimits())
+        {
+            var selected = limit == currentLimit ? "selected" : "";
+            sb.AppendLine($"                                <option value=\"{limit}\" {selected}>{limit}</option>");
+        }
+
+        sb.AppendLine("""
+                            </select>
+                        </div>
+                    </div>
+                    <div class="log-container">
+            """);
+
+        if (entries.Count == 0)
+        {
+            sb.AppendLine($"            <div class=\"log-entry\">No {tunnelName} sessions yet</div>");
+        }
+        else
+        {
+            foreach (var entry in entries)
+            {
+                sb.AppendLine($"""
+                            <div class="session-entry">
+                                <span><span class="session-ip">{entry.IpAddress}</span></span>
+                                <span><span class="session-duration">{entry.DurationFormatted}</span> <span class="session-time">{entry.StartTime.ToLocalTime():HH:mm:ss}</span></span>
+                            </div>
+                    """);
+            }
+        }
+
+        sb.AppendLine("        </div>");
+        sb.AppendLine("    </div>");
     }
 
     #endregion
