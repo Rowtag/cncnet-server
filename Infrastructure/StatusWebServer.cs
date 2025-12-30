@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -37,6 +38,8 @@ public sealed class StatusWebServer : IDisposable
     // Session management
     private readonly ConcurrentDictionary<string, DateTime> _sessions = new();
     private static readonly TimeSpan SessionDuration = TimeSpan.FromHours(24);
+    private const int MaxSessions = 100; // Prevent memory exhaustion from session creation
+    private readonly Timer _cleanupTimer;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -61,6 +64,43 @@ public sealed class StatusWebServer : IDisposable
 
         _listener = new HttpListener();
         _listener.IgnoreWriteExceptions = true;
+
+        // Setup cleanup timer for expired sessions and login attempts (every 5 minutes)
+        _cleanupTimer = new Timer(CleanupExpiredData, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
+    }
+
+    /// <summary>
+    /// Cleans up expired sessions and login lockouts to prevent memory buildup.
+    /// </summary>
+    private void CleanupExpiredData(object? state)
+    {
+        var now = DateTime.UtcNow;
+        var expiredSessionCount = 0;
+        var expiredLockoutCount = 0;
+
+        // Remove expired sessions
+        foreach (var (sessionId, expiry) in _sessions)
+        {
+            if (now >= expiry && _sessions.TryRemove(sessionId, out _))
+            {
+                expiredSessionCount++;
+            }
+        }
+
+        // Remove expired login lockouts
+        foreach (var (ip, (_, lockoutUntil)) in _loginAttempts)
+        {
+            if (now >= lockoutUntil && _loginAttempts.TryRemove(ip, out _))
+            {
+                expiredLockoutCount++;
+            }
+        }
+
+        if (expiredSessionCount > 0 || expiredLockoutCount > 0)
+        {
+            _logger.Debug("[WEB] Cleanup: removed {Sessions} expired sessions, {Lockouts} expired lockouts",
+                expiredSessionCount, expiredLockoutCount);
+        }
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -99,6 +139,9 @@ public sealed class StatusWebServer : IDisposable
         var request = context.Request;
         var path = request.Url?.AbsolutePath ?? "/";
         var clientIp = request.RemoteEndPoint?.Address.ToString() ?? "unknown";
+
+        // Add security headers to all responses
+        AddSecurityHeaders(response);
 
         try
         {
@@ -184,6 +227,62 @@ public sealed class StatusWebServer : IDisposable
         }
     }
 
+    #region Security
+
+    /// <summary>
+    /// Adds security headers to prevent common web vulnerabilities.
+    /// </summary>
+    private static void AddSecurityHeaders(HttpListenerResponse response)
+    {
+        // Prevent clickjacking attacks
+        response.Headers.Add("X-Frame-Options", "DENY");
+
+        // Prevent MIME type sniffing
+        response.Headers.Add("X-Content-Type-Options", "nosniff");
+
+        // Enable XSS filter in older browsers
+        response.Headers.Add("X-XSS-Protection", "1; mode=block");
+
+        // Content Security Policy - restrict resources to same origin
+        response.Headers.Add("Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'");
+
+        // Referrer policy - don't leak referrer information
+        response.Headers.Add("Referrer-Policy", "strict-origin-when-cross-origin");
+
+        // Permissions policy - disable unnecessary browser features
+        response.Headers.Add("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+
+        // Cache control for security-sensitive pages
+        response.Headers.Add("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+        response.Headers.Add("Pragma", "no-cache");
+    }
+
+    /// <summary>
+    /// Sets a secure session cookie with HttpOnly, SameSite, and optional Secure flags.
+    /// </summary>
+    private static void SetSecureSessionCookie(HttpListenerResponse response, string sessionId, bool isHttps = false)
+    {
+        // Build cookie with security flags
+        // Note: Secure flag requires HTTPS - we set it based on connection type
+        var cookieValue = $"session={sessionId}; Path=/; HttpOnly; SameSite=Strict";
+        if (isHttps)
+        {
+            cookieValue += "; Secure";
+        }
+        response.Headers.Add("Set-Cookie", cookieValue);
+    }
+
+    /// <summary>
+    /// Clears the session cookie securely.
+    /// </summary>
+    private static void ClearSessionCookie(HttpListenerResponse response)
+    {
+        response.Headers.Add("Set-Cookie", "session=; Path=/; HttpOnly; SameSite=Strict; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+    }
+
+    #endregion
+
     #region Authentication
 
     private bool IsAuthenticated(HttpListenerRequest request)
@@ -211,14 +310,57 @@ public sealed class StatusWebServer : IDisposable
             return;
         }
 
-        // Read POST body
+        // Validate Content-Type
+        if (request.ContentType == null || !request.ContentType.StartsWith("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
+        {
+            response.StatusCode = 415; // Unsupported Media Type
+            return;
+        }
+
+        // Limit POST body size (1KB is more than enough for password)
+        const int maxBodySize = 1024;
+        if (request.ContentLength64 > maxBodySize)
+        {
+            response.StatusCode = 413; // Payload Too Large
+            return;
+        }
+
+        // Read POST body with size limit
         using var reader = new StreamReader(request.InputStream, request.ContentEncoding);
-        var body = await reader.ReadToEndAsync();
+        var buffer = new char[maxBodySize];
+        var bytesRead = await reader.ReadAsync(buffer, 0, maxBodySize);
+        var body = new string(buffer, 0, bytesRead);
         var formData = HttpUtility.ParseQueryString(body);
         var password = formData["password"];
 
-        if (password == _options.Maintenance.Password)
+        // Use constant-time comparison to prevent timing attacks
+        var isValidPassword = !string.IsNullOrEmpty(password) &&
+                              !string.IsNullOrEmpty(_options.Maintenance.Password) &&
+                              CryptographicOperations.FixedTimeEquals(
+                                  Encoding.UTF8.GetBytes(password),
+                                  Encoding.UTF8.GetBytes(_options.Maintenance.Password));
+
+        if (isValidPassword)
         {
+            // Check session limit to prevent memory exhaustion
+            if (_sessions.Count >= MaxSessions)
+            {
+                // Remove 10% of oldest sessions to make room and avoid frequent cleanup
+                var sessionsToRemove = Math.Max(10, MaxSessions / 10);
+                var oldestSessions = _sessions
+                    .OrderBy(s => s.Value)
+                    .Take(sessionsToRemove)
+                    .Select(s => s.Key)
+                    .ToList();
+
+                foreach (var oldSession in oldestSessions)
+                {
+                    _sessions.TryRemove(oldSession, out _);
+                }
+
+                _logger.Debug("[WEB] Session limit reached, removed {Count} oldest sessions", sessionsToRemove);
+            }
+
             // Successful login - create session
             var sessionId = Guid.NewGuid().ToString("N");
             _sessions[sessionId] = DateTime.UtcNow.Add(SessionDuration);
@@ -226,10 +368,11 @@ public sealed class StatusWebServer : IDisposable
             // Clear failed attempts
             _loginAttempts.TryRemove(clientIp, out _);
 
-            // Set session cookie
-            response.SetCookie(new Cookie("session", sessionId) { Path = "/" });
+            // Set secure session cookie
+            var isHttps = request.IsSecureConnection;
+            SetSecureSessionCookie(response, sessionId, isHttps);
 
-            _logger.Information("[WEB] Successful login from {IP}", clientIp);
+            _logger.Information("[WEB] Successful login from {IP}", IpAnonymizer.Anonymize(clientIp));
 
             response.Redirect("/");
         }
@@ -244,12 +387,12 @@ public sealed class StatusWebServer : IDisposable
             if (currentAttempts.Attempts >= MaxLoginAttempts)
             {
                 _loginAttempts[clientIp] = (currentAttempts.Attempts, DateTime.UtcNow.Add(LockoutDuration));
-                _logger.Warning("[WEB] IP {IP} locked out after {Attempts} failed login attempts", clientIp, currentAttempts.Attempts);
+                _logger.Warning("[WEB] IP {IP} locked out after {Attempts} failed login attempts", IpAnonymizer.Anonymize(clientIp), currentAttempts.Attempts);
                 await SendLoginPageAsync(response, $"Too many failed attempts. Locked out for {LockoutDuration.TotalMinutes} minutes.");
             }
             else
             {
-                _logger.Warning("[WEB] Failed login attempt from {IP} ({Attempts}/{Max})", clientIp, currentAttempts.Attempts, MaxLoginAttempts);
+                _logger.Warning("[WEB] Failed login attempt from {IP} ({Attempts}/{Max})", IpAnonymizer.Anonymize(clientIp), currentAttempts.Attempts, MaxLoginAttempts);
                 await SendLoginPageAsync(response, $"Invalid password. {MaxLoginAttempts - currentAttempts.Attempts} attempts remaining.");
             }
         }
@@ -263,8 +406,8 @@ public sealed class StatusWebServer : IDisposable
             _sessions.TryRemove(cookie.Value, out _);
         }
 
-        // Clear cookie
-        response.SetCookie(new Cookie("session", "") { Path = "/", Expires = DateTime.Now.AddDays(-1) });
+        // Clear cookie securely
+        ClearSessionCookie(response);
         response.Redirect("/login");
     }
 
@@ -1298,6 +1441,7 @@ public sealed class StatusWebServer : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
+        _cleanupTimer.Dispose();
         _listener.Stop();
         _listener.Close();
         _cts.Dispose();

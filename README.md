@@ -12,6 +12,7 @@ A modern, high-performance UDP relay server for Command & Conquer games on CnCNe
 - **Web Dashboard** - Real-time monitoring with login protection
 - **DDoS Protection** - Rate limiting, IP blacklists, packet validation
 - **Runtime Configuration** - Adjust settings via web interface
+- **GDPR Compliant** - IP anonymization in logs, privacy by design
 
 ---
 
@@ -217,9 +218,24 @@ Logs are written to the `logs/` directory with automatic rolling and retention.
 
 ---
 
+## Privacy & GDPR
+
+This server is designed with privacy in mind:
+
+- **IP Anonymization** - IP addresses are masked in all log files (last octet for IPv4, last 80 bits for IPv6)
+- **No Personal Data** - Only technical connection data required for operation is processed
+- **Minimal Retention** - In-memory logs are limited to 1000 entries, file logs rotate automatically
+- **Security Blacklists** - Blocked IPs are stored in full for DDoS protection (legitimate interest under GDPR Art. 6(1)(f))
+
+---
+
 ## License
 
-MIT License - See [LICENSE](LICENSE) file for details.
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+
+You are free to use, modify, and distribute this software under the terms of the GPL v3. Any derivative works must also be released under GPL v3.
+
+See [LICENSE](LICENSE) file for the full license text.
 
 ---
 

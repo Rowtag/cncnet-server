@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CnCNetServer.Configuration;
@@ -69,6 +70,11 @@ public sealed class TunnelV2 : IDisposable
     private long _packetsRelayed;
     private long _bytesRelayed;
     private int _activeRequestCount;
+
+    // Brute-force protection for maintenance endpoint
+    private readonly ConcurrentDictionary<string, (int Attempts, DateTime LockoutUntil)> _maintenanceAttempts = new();
+    private const int MaxMaintenanceAttempts = 3;
+    private static readonly TimeSpan MaintenanceLockoutDuration = TimeSpan.FromMinutes(30);
 
     /// <summary>
     /// Gets whether maintenance mode is currently enabled.
@@ -266,7 +272,8 @@ public sealed class TunnelV2 : IDisposable
             }
             else if (path.StartsWith("/maintenance/", StringComparison.OrdinalIgnoreCase))
             {
-                HandleMaintenanceRequest(path, response);
+                var clientIp = request.RemoteEndPoint?.Address.ToString() ?? "unknown";
+                HandleMaintenanceRequest(path, response, clientIp);
             }
             else
             {
@@ -363,9 +370,10 @@ public sealed class TunnelV2 : IDisposable
     }
 
     /// <summary>
-    /// Handles a maintenance mode toggle request.
+    /// Handles a maintenance mode toggle request with brute-force protection.
+    /// Uses constant-time comparison and IP-based lockout.
     /// </summary>
-    private void HandleMaintenanceRequest(string path, HttpListenerResponse response)
+    private void HandleMaintenanceRequest(string path, HttpListenerResponse response, string clientIp)
     {
         if (string.IsNullOrEmpty(_options.Maintenance.Password))
         {
@@ -373,15 +381,52 @@ public sealed class TunnelV2 : IDisposable
             return;
         }
 
+        // Check brute-force lockout
+        if (_maintenanceAttempts.TryGetValue(clientIp, out var attempt) && DateTime.UtcNow < attempt.LockoutUntil)
+        {
+            response.StatusCode = 429; // Too Many Requests
+            return;
+        }
+
         var parts = path.Split('/');
-        if (parts.Length < 3 || parts[2] != _options.Maintenance.Password)
+        if (parts.Length < 3)
         {
             response.StatusCode = 401;
             return;
         }
 
+        var providedPassword = parts[2];
+
+        // Use constant-time comparison to prevent timing attacks
+        var isValid = !string.IsNullOrEmpty(providedPassword) &&
+                      CryptographicOperations.FixedTimeEquals(
+                          Encoding.UTF8.GetBytes(providedPassword),
+                          Encoding.UTF8.GetBytes(_options.Maintenance.Password));
+
+        if (!isValid)
+        {
+            // Track failed attempt
+            var attempts = _maintenanceAttempts.AddOrUpdate(
+                clientIp,
+                _ => (1, DateTime.MinValue),
+                (_, existing) => (existing.Attempts + 1, existing.LockoutUntil));
+
+            if (attempts.Attempts >= MaxMaintenanceAttempts)
+            {
+                _maintenanceAttempts[clientIp] = (attempts.Attempts, DateTime.UtcNow.Add(MaintenanceLockoutDuration));
+                _logger.Warning("[V2] Maintenance endpoint locked out for IP {IP} after {Attempts} failed attempts",
+                    IpAnonymizer.Anonymize(clientIp), attempts.Attempts);
+            }
+
+            response.StatusCode = 401;
+            return;
+        }
+
+        // Clear failed attempts on success
+        _maintenanceAttempts.TryRemove(clientIp, out _);
+
         _maintenanceMode = true;
-        _logger.Warning("V2 Maintenance mode ENABLED via HTTP");
+        _logger.Warning("V2 Maintenance mode ENABLED via HTTP from {IP}", IpAnonymizer.Anonymize(clientIp));
         response.StatusCode = 200;
     }
 

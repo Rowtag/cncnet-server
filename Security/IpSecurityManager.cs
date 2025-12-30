@@ -44,6 +44,26 @@ public sealed class IpSecurityManager : IDisposable
     /// </summary>
     private const int BlacklistRefreshIntervalHours = 1;
 
+    /// <summary>
+    /// Maximum number of tracked IPs to prevent memory exhaustion.
+    /// </summary>
+    private const int MaxTrackedIps = 10000;
+
+    /// <summary>
+    /// Maximum number of local blacklist entries.
+    /// </summary>
+    private const int MaxLocalBlacklistEntries = 1000;
+
+    /// <summary>
+    /// Maximum number of external blacklist IPs to prevent memory exhaustion.
+    /// </summary>
+    private const int MaxExternalBlacklistIps = 100000;
+
+    /// <summary>
+    /// Maximum number of external blacklist networks (CIDR ranges).
+    /// </summary>
+    private const int MaxExternalBlacklistNetworks = 10000;
+
     public IpSecurityManager(SecurityOptions options, ILogger logger)
     {
         _options = options;
@@ -116,6 +136,10 @@ public sealed class IpSecurityManager : IDisposable
         if (_rateLimits.Count >= maxGlobal)
             return false;
 
+        // Prevent memory exhaustion - reject if too many IPs tracked
+        if (_rateLimits.Count >= MaxTrackedIps)
+            return false;
+
         var ipHash = address.GetHashCode();
         var entry = _rateLimits.GetOrAdd(ipHash, _ => new RateLimitEntry());
 
@@ -131,6 +155,10 @@ public sealed class IpSecurityManager : IDisposable
     /// <returns>True if connection is allowed, false if limit exceeded.</returns>
     public bool TrackConnection(IPAddress address, int maxConnectionsPerIp)
     {
+        // Prevent memory exhaustion - reject if too many IPs tracked
+        if (_rateLimits.Count >= MaxTrackedIps)
+            return false;
+
         var ipHash = address.GetHashCode();
         var entry = _rateLimits.GetOrAdd(ipHash, _ => new RateLimitEntry());
 
@@ -156,10 +184,17 @@ public sealed class IpSecurityManager : IDisposable
     /// <param name="address">The IP address to blacklist.</param>
     public void AddToBlacklist(IPAddress address)
     {
+        // Prevent memory exhaustion - don't add if at limit
+        if (_localBlacklist.Count >= MaxLocalBlacklistEntries)
+        {
+            _logger.Warning("Local blacklist at capacity ({Max}), cannot add IP {IP}", MaxLocalBlacklistEntries, IpAnonymizer.Anonymize(address));
+            return;
+        }
+
         var ipHash = address.GetHashCode();
         var expiry = DateTime.UtcNow.AddHours(_options.IpBlacklistDurationHours);
         _localBlacklist[ipHash] = (expiry, address.ToString());
-        _logger.Warning("IP {IP} added to local blacklist until {Expiry}", address, expiry);
+        _logger.Warning("IP {IP} added to local blacklist until {Expiry}", IpAnonymizer.Anonymize(address), expiry);
     }
 
     /// <summary>
@@ -190,7 +225,7 @@ public sealed class IpSecurityManager : IDisposable
         var ipHash = address.GetHashCode();
         var removed = _localBlacklist.TryRemove(ipHash, out _);
         if (removed)
-            _logger.Warning("IP {IP} manually removed from local blacklist", ipAddress);
+            _logger.Warning("IP {IP} manually removed from local blacklist", IpAnonymizer.Anonymize(ipAddress));
         return removed;
     }
 
@@ -278,6 +313,10 @@ public sealed class IpSecurityManager : IDisposable
             // Check if it's a CIDR range
             if (trimmed.Contains('/'))
             {
+                // Limit check for networks
+                if (networks >= MaxExternalBlacklistNetworks)
+                    continue;
+
                 if (TryParseCidr(trimmed, out var network, out var mask))
                 {
                     _networkLock.EnterWriteLock();
@@ -294,6 +333,10 @@ public sealed class IpSecurityManager : IDisposable
             }
             else if (IPAddress.TryParse(trimmed, out var address))
             {
+                // Limit check for IPs
+                if (ips >= MaxExternalBlacklistIps)
+                    continue;
+
                 _externalBlacklist[address.GetHashCode()] = true;
                 ips++;
             }
