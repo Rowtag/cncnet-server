@@ -40,9 +40,10 @@ internal static class TunnelV3PacketValidation
         if (senderId == 0 && receiverId == 0)
             return size == PingPacketSize;
 
-        // Registration: senderId!=0, receiverId=0, size=8
+        // Registration/Handshake: senderId!=0, receiverId=0
+        // Can be 8 bytes (simple registration) or larger (extended handshake)
         if (senderId != 0 && receiverId == 0)
-            return size == RegistrationPacketSize;
+            return size >= RegistrationPacketSize;
 
         // Data packets: senderId!=0, receiverId!=0
         if (senderId != 0 && receiverId != 0)
@@ -52,14 +53,9 @@ internal static class TunnelV3PacketValidation
                 return true;
 
             // Game data packet (size > 8, no magic bytes)
-            if (size > HeaderSize && !HasMagicBytes(buffer))
-            {
-                // Suspicious: between 9-14 bytes without magic bytes
-                if (size >= 9 && size < MinNegotiationPacketSize)
-                    return false;
-
+            // Allow all sizes - games may send small ACK/heartbeat packets
+            if (size > HeaderSize)
                 return true;
-            }
 
             // Has both IDs but doesn't match any known format
             return false;

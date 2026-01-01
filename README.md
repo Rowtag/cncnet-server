@@ -1,4 +1,4 @@
-# CnCNet Tunnel Server v4.0
+# CnCNet Tunnel Server v4.1
 
 A modern, high-performance UDP relay server for Command & Conquer games on CnCNet.
 
@@ -42,13 +42,13 @@ Make sure these ports are open/forwarded:
 |--------|-------------|---------|
 | `-n, --name <name>` | Server name shown in server list | - |
 | `-p, --port <port>` | V3 tunnel port (UDP) | 50001 |
-| `--portv2 <port>` | V2 tunnel port (HTTP+UDP) | 50000 |
+| `-pv2, --portv2 <port>` | V2 tunnel port (HTTP+UDP) | 50000 |
 | `-m, --maxclients <n>` | Maximum clients allowed | 200 |
 | `-t, --timeout <sec>` | Client timeout in seconds | 60 |
 | `-l, --iplimit <n>` | Max clients per IP (V3) | 8 |
-| `--iplimitv2 <n>` | Max requests per IP (V2) | 8 |
+| `-iplv2, --iplimitv2 <n>` | Max requests per IP (V2) | 8 |
 | `--nomaster` | Don't register to master server | - |
-| `--maintpw <pw>` | Admin password for web dashboard | - |
+| `-mpw, --maintpw <pw>` | Admin password for web dashboard | - |
 | `--nop2p` | Disable STUN servers | - |
 | `--nostatus` | Disable web dashboard | - |
 | `--statusport <port>` | Web dashboard port | 1337 |
@@ -239,10 +239,18 @@ See [LICENSE](LICENSE) file for the full license text.
 
 ---
 
-## Links
+## Credits
 
-- [CnCNet Website](https://cncnet.org)
+This project is based on the original [CnCNet Tunnel Server](https://github.com/CnCNet/cncnet-server).
+
+**Contributors:**
+- [FunkyFr3sh](https://github.com/FunkyFr3sh) - Original author
+- [GrantBartlett](https://github.com/GrantBartlett) - Contributor
+- [Rowtag](https://github.com/Starter2007) - v4.0 rewrite & modernization
 
 ---
 
-*made with love by Rowtag*
+## Links
+
+- [CnCNet Website](https://cncnet.org)
+- [Original Repository](https://github.com/CnCNet/cncnet-server)

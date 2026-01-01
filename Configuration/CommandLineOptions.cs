@@ -41,6 +41,17 @@ public sealed class CommandLineOptions
     public string LogDir { get; set; } = "logs";
     public bool Verbose { get; set; }
 
+    // Diagnostics
+    public bool RowtagMode { get; set; }
+    public bool TraceAll { get; set; }
+    public bool TraceImportant { get; set; }
+
+    // File logging
+    public string? LogFile { get; set; }
+
+    // Trace file logging
+    public string? TraceFile { get; set; }
+
     // Option definitions (stored for parsing)
     private static readonly Option<string> NameOption = new(
         ["--name", "-n"], () => "Unnamed server",
@@ -63,11 +74,11 @@ public sealed class CommandLineOptions
         "Maximum clients allowed per IP address (V3)");
 
     private static readonly Option<int> PortV2Option = new(
-        ["--portv2"], () => 50000,
+        ["--portv2", "-pv2"], () => 50000,
         "Port used for the V2 tunnel server (HTTP + UDP)");
 
     private static readonly Option<int> IpLimitV2Option = new(
-        ["--iplimitv2"], () => 4,
+        ["--iplimitv2", "-iplv2"], () => 4,
         "Maximum game requests allowed per IP address (V2)");
 
     private static readonly Option<bool> NoP2POption = new(
@@ -87,7 +98,7 @@ public sealed class CommandLineOptions
         "Master server password");
 
     private static readonly Option<string> MaintPwOption = new(
-        ["--maintpw"], () => string.Empty,
+        ["--maintpw", "-mpw"], () => string.Empty,
         "Maintenance mode password");
 
     private static readonly Option<int> StatusPortOption = new(
@@ -105,6 +116,26 @@ public sealed class CommandLineOptions
     private static readonly Option<bool> VerboseOption = new(
         ["--verbose", "-v"], () => false,
         "Enable verbose (debug) logging");
+
+    private static readonly Option<bool> RowtagModeOption = new(
+        ["--rowtagmode"], () => false,
+        "Enable advanced features (IP tracing, runtime server name change)");
+
+    private static readonly Option<bool> TraceAllOption = new(
+        ["--trace-all"], () => false,
+        "Enable tracing of ALL connections from startup (requires --rowtagmode, resource intensive)");
+
+    private static readonly Option<bool> TraceImportantOption = new(
+        ["--trace-important"], () => false,
+        "Enable tracing of important events only (requires --rowtagmode, resource efficient)");
+
+    private static readonly Option<string?> LogFileOption = new(
+        ["--logfile"], () => null,
+        "Write logs to file (relative to server directory)");
+
+    private static readonly Option<string?> TraceFileOption = new(
+        ["--trace-file"], () => null,
+        "Write IP trace events to separate file (relative to server directory)");
 
     /// <summary>
     /// Builds the System.CommandLine RootCommand with all options.
@@ -129,6 +160,11 @@ public sealed class CommandLineOptions
         rootCommand.AddOption(NoStatusOption);
         rootCommand.AddOption(LogDirOption);
         rootCommand.AddOption(VerboseOption);
+        rootCommand.AddOption(RowtagModeOption);
+        rootCommand.AddOption(TraceAllOption);
+        rootCommand.AddOption(TraceImportantOption);
+        rootCommand.AddOption(LogFileOption);
+        rootCommand.AddOption(TraceFileOption);
 
         return rootCommand;
     }
@@ -158,7 +194,12 @@ public sealed class CommandLineOptions
             StatusPort = parseResult.GetValueForOption(StatusPortOption),
             NoStatus = parseResult.GetValueForOption(NoStatusOption),
             LogDir = parseResult.GetValueForOption(LogDirOption) ?? "logs",
-            Verbose = parseResult.GetValueForOption(VerboseOption)
+            Verbose = parseResult.GetValueForOption(VerboseOption),
+            RowtagMode = parseResult.GetValueForOption(RowtagModeOption),
+            TraceAll = parseResult.GetValueForOption(TraceAllOption),
+            TraceImportant = parseResult.GetValueForOption(TraceImportantOption),
+            LogFile = parseResult.GetValueForOption(LogFileOption),
+            TraceFile = parseResult.GetValueForOption(TraceFileOption)
         };
     }
 
@@ -223,6 +264,15 @@ public sealed class CommandLineOptions
                 RetentionDays = 15,
                 RollingIntervalDays = 2,
                 MinimumLevel = Verbose ? "Debug" : "Information"
+            },
+            Diagnostics = new DiagnosticsOptions
+            {
+                RowtagMode = RowtagMode, // --rowtagmode enables advanced features
+                TraceAllConnections = RowtagMode, // Tracing UI only available with --rowtagmode
+                TraceAllFromStart = RowtagMode && (TraceAll || TraceImportant || !string.IsNullOrEmpty(TraceFile)), // Requires --rowtagmode
+                TraceImportantOnly = RowtagMode && TraceImportant, // --trace-important requires --rowtagmode
+                LogFile = LogFile,
+                TraceFile = RowtagMode ? TraceFile : null // --trace-file requires --rowtagmode
             }
         };
     }
