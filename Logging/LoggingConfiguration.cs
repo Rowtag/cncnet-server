@@ -14,8 +14,9 @@ public static class LoggingConfiguration
     /// Creates a configured Serilog logger instance.
     /// </summary>
     /// <param name="options">Logging configuration options.</param>
+    /// <param name="logFilePath">Optional additional log file path (from --logfile).</param>
     /// <returns>Configured ILogger instance.</returns>
-    public static ILogger CreateLogger(LoggingOptions options)
+    public static ILogger CreateLogger(LoggingOptions options, string? logFilePath = null)
     {
         // Parse minimum log level from configuration
         var minimumLevel = ParseLogLevel(options.MinimumLevel);
@@ -49,7 +50,32 @@ public static class LoggingConfiguration
                 flushToDiskInterval: TimeSpan.FromSeconds(1))
             .WriteTo.Sink(InMemoryLogSink.Instance);
 
+        // Add additional log file if specified via --logfile
+        if (!string.IsNullOrEmpty(logFilePath))
+        {
+            var absoluteLogPath = GetLogFilePath(logFilePath);
+            loggerConfig.WriteTo.File(
+                path: absoluteLogPath,
+                outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff} UTC] [{Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}",
+                shared: true,
+                flushToDiskInterval: TimeSpan.FromSeconds(1));
+        }
+
         return loggerConfig.CreateLogger();
+    }
+
+    /// <summary>
+    /// Gets the absolute path for a log file (--logfile option).
+    /// If relative, makes it relative to the application directory.
+    /// </summary>
+    private static string GetLogFilePath(string configuredPath)
+    {
+        if (!Path.IsPathRooted(configuredPath))
+        {
+            var appDirectory = AppContext.BaseDirectory;
+            return Path.Combine(appDirectory, configuredPath);
+        }
+        return configuredPath;
     }
 
     /// <summary>

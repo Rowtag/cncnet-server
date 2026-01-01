@@ -227,7 +227,5 @@ logs/
 publish/
 out/
 
-# Local settings (may contain passwords)
-appsettings.*.json
-!appsettings.json
-!appsettings.Development.json
+# Session handover documents (internal use only)
+SESSION_HANDOVER.md

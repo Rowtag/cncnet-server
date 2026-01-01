@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using CnCNetServer.Security;
 
 namespace CnCNetServer.Logging;
 
@@ -38,40 +39,54 @@ public sealed class SessionLog
         _maxEntries = maxEntries;
     }
 
+    // UNUSED: Reserved for future live session tracking (show active sessions in dashboard)
+    // /// <summary>
+    // /// Records a new session start. Returns a session ID for tracking.
+    // /// IP addresses are anonymized for GDPR compliance.
+    // /// </summary>
+    // public Guid StartSession(string ipAddress)
+    // {
+    //     var sessionId = Guid.NewGuid();
+    //     var entry = new SessionEntry
+    //     {
+    //         SessionId = sessionId,
+    //         IpAddress = IpAnonymizer.Anonymize(ipAddress),
+    //         StartTime = DateTime.UtcNow,
+    //         Status = SessionStatus.Active
+    //     };
+    //
+    //     _entries.Enqueue(entry);
+    //
+    //     // Enforce max entries
+    //     while (_entries.Count > _maxEntries)
+    //     {
+    //         _entries.TryDequeue(out _);
+    //     }
+    //
+    //     return sessionId;
+    // }
+
     /// <summary>
-    /// Records a new session start. Returns a session ID for tracking.
+    /// Minimum session duration to be logged (2 minutes).
+    /// Sessions shorter than this are considered slot reservations, not real games.
     /// </summary>
-    public Guid StartSession(string ipAddress)
-    {
-        var sessionId = Guid.NewGuid();
-        var entry = new SessionEntry
-        {
-            SessionId = sessionId,
-            IpAddress = ipAddress,
-            StartTime = DateTime.UtcNow,
-            Status = SessionStatus.Active
-        };
-
-        _entries.Enqueue(entry);
-
-        // Enforce max entries
-        while (_entries.Count > _maxEntries)
-        {
-            _entries.TryDequeue(out _);
-        }
-
-        return sessionId;
-    }
+    public static readonly TimeSpan MinimumSessionDuration = TimeSpan.FromMinutes(2);
 
     /// <summary>
     /// Records a completed session with duration.
+    /// Only logs sessions longer than 2 minutes (established sessions).
+    /// IP addresses are anonymized for GDPR compliance.
     /// </summary>
     public void LogSession(string ipAddress, TimeSpan duration)
     {
+        // Only log sessions that lasted at least 2 minutes (established sessions)
+        if (duration < MinimumSessionDuration)
+            return;
+
         var entry = new SessionEntry
         {
             SessionId = Guid.NewGuid(),
-            IpAddress = ipAddress,
+            IpAddress = IpAnonymizer.Anonymize(ipAddress),
             StartTime = DateTime.UtcNow - duration,
             EndTime = DateTime.UtcNow,
             Duration = duration,
@@ -149,6 +164,7 @@ public sealed class SessionEntry
 
 public enum SessionStatus
 {
-    Active,
+    // UNUSED: Reserved for future live session tracking
+    // Active,
     Completed
 }

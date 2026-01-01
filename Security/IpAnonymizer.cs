@@ -36,14 +36,15 @@ public static class IpAnonymizer
 
         if (bytes.Length == 4)
         {
-            // IPv4: Mask last octet
-            bytes[3] = 0;
+            // IPv4: Replace last octet with "x" (e.g., 192.168.1.123 -> 192.168.1.x)
+            return $"{bytes[0]}.{bytes[1]}.{bytes[2]}.x";
         }
         else if (bytes.Length == 16)
         {
             // IPv6: Mask last 80 bits (bytes 6-15)
             for (var i = 6; i < 16; i++)
                 bytes[i] = 0;
+            return new IPAddress(bytes).ToString();
         }
 
         return new IPAddress(bytes).ToString();

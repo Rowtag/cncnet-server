@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using CnCNetServer.Configuration;
+using CnCNetServer.Diagnostics;
 using Serilog;
 
 namespace CnCNetServer.Security;
@@ -28,6 +29,11 @@ public sealed class IpSecurityManager : IDisposable
     // CIDR network blacklist for external sources
     private readonly List<(uint Network, uint Mask)> _networkBlacklist = [];
     private readonly ReaderWriterLockSlim _networkLock = new();
+
+    // Known-good IP cache: IPs that passed blacklist check (cleared on blacklist refresh)
+    // PERFORMANCE: Avoids repeated O(n) blacklist iterations for returning IPs
+    private readonly ConcurrentDictionary<int, bool> _knownGoodIps = new();
+    private const int MaxKnownGoodIps = 50000;
 
     // Statistics
     private long _totalConnections;
@@ -86,6 +92,7 @@ public sealed class IpSecurityManager : IDisposable
 
     /// <summary>
     /// Checks if an IP address is allowed to connect (not blacklisted).
+    /// PERFORMANCE: Uses known-good cache to avoid repeated O(n) blacklist iterations.
     /// </summary>
     /// <param name="address">The IP address to check.</param>
     /// <returns>True if allowed, false if blocked.</returns>
@@ -94,30 +101,49 @@ public sealed class IpSecurityManager : IDisposable
         Interlocked.Increment(ref _totalConnections);
         var ipHash = address.GetHashCode();
 
-        // Check local blacklist first (fastest check)
+        // Check local blacklist first (fastest check, always checked - can change at runtime)
         if (_localBlacklist.TryGetValue(ipHash, out var entry))
         {
             if (DateTime.UtcNow < entry.Expiry)
             {
                 Interlocked.Increment(ref _blockedByLocalBlacklist);
+                ConnectionTracer.Instance.LogEvent(address, TraceEventType.BlockedByLocalBlacklist,
+                    $"Blocked until {entry.Expiry:HH:mm:ss}");
                 return false;
             }
             // Entry expired, remove it
             _localBlacklist.TryRemove(ipHash, out _);
         }
 
-        // Check external blacklist
+        // PERFORMANCE: Check known-good cache before expensive blacklist lookups
+        // This avoids O(n) CIDR iteration for returning IPs
+        if (_knownGoodIps.ContainsKey(ipHash))
+        {
+            return true;
+        }
+
+        // Check external blacklist (IP hash lookup - O(1))
         if (_externalBlacklist.ContainsKey(ipHash))
         {
             Interlocked.Increment(ref _blockedByExternalBlacklist);
+            ConnectionTracer.Instance.LogEvent(address, TraceEventType.BlockedByExternalBlacklist,
+                "Blocked by external IP blacklist");
             return false;
         }
 
-        // Check network blacklist (CIDR ranges)
+        // Check network blacklist (CIDR ranges - O(n) iteration)
         if (IsInNetworkBlacklist(address))
         {
             Interlocked.Increment(ref _blockedByExternalBlacklist);
+            ConnectionTracer.Instance.LogEvent(address, TraceEventType.BlockedByExternalBlacklist,
+                "Blocked by external CIDR blacklist");
             return false;
+        }
+
+        // IP passed all checks - add to known-good cache
+        if (_knownGoodIps.Count < MaxKnownGoodIps)
+        {
+            _knownGoodIps.TryAdd(ipHash, true);
         }
 
         return true;
@@ -195,6 +221,9 @@ public sealed class IpSecurityManager : IDisposable
         var expiry = DateTime.UtcNow.AddHours(_options.IpBlacklistDurationHours);
         _localBlacklist[ipHash] = (expiry, address.ToString());
         _logger.Warning("IP {IP} added to local blacklist until {Expiry}", IpAnonymizer.Anonymize(address), expiry);
+
+        ConnectionTracer.Instance.LogEvent(address, TraceEventType.AddedToBlacklist,
+            $"Added to local blacklist for {_options.IpBlacklistDurationHours}h");
     }
 
     /// <summary>
@@ -258,6 +287,7 @@ public sealed class IpSecurityManager : IDisposable
 
     /// <summary>
     /// Refreshes external IP blacklists from configured URLs.
+    /// PERFORMANCE: Clears known-good cache to ensure new blacklist entries take effect.
     /// </summary>
     public async Task RefreshExternalBlacklistsAsync()
     {
@@ -265,6 +295,10 @@ public sealed class IpSecurityManager : IDisposable
             return;
 
         _logger.Information("Refreshing external IP blacklists...");
+
+        // PERFORMANCE: Clear known-good cache so IPs are re-checked against new blacklist
+        var cachedCount = _knownGoodIps.Count;
+        _knownGoodIps.Clear();
 
         var totalIps = 0;
         var totalNetworks = 0;
@@ -289,8 +323,8 @@ public sealed class IpSecurityManager : IDisposable
         }
 
         _logger.Information(
-            "External blacklist loaded: {IpCount} IPs, {NetworkCount} networks from {Success}/{Total} sources",
-            totalIps, totalNetworks, successfulSources, _options.ExternalBlacklistUrls.Length);
+            "External blacklist loaded: {IpCount} IPs, {NetworkCount} networks from {Success}/{Total} sources (cleared {CacheCount} cached IPs)",
+            totalIps, totalNetworks, successfulSources, _options.ExternalBlacklistUrls.Length, cachedCount);
     }
 
     /// <summary>
@@ -373,9 +407,14 @@ public sealed class IpSecurityManager : IDisposable
 
     /// <summary>
     /// Checks if an IP address is within any blacklisted network range.
+    /// PERFORMANCE: Early exit if no networks are blacklisted.
     /// </summary>
     private bool IsInNetworkBlacklist(IPAddress address)
     {
+        // PERFORMANCE: Quick check without lock - most common case
+        if (_networkBlacklist.Count == 0)
+            return false;
+
         if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
             return false;
 
