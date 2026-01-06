@@ -1,13 +1,9 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CnCNetServer.Configuration;
-using CnCNetServer.Infrastructure;
-using CnCNetServer.Diagnostics;
-using CnCNetServer.Logging;
 using CnCNetServer.Models;
 using CnCNetServer.Security;
 using Serilog;
@@ -72,23 +68,6 @@ public sealed class TunnelV2 : IDisposable
     private long _packetsRelayed;
     private long _bytesRelayed;
     private int _activeRequestCount;
-
-    // Brute-force protection for maintenance endpoint
-    private readonly ConcurrentDictionary<string, (int Attempts, DateTime LockoutUntil)> _maintenanceAttempts = new();
-    private const int MaxMaintenanceAttempts = 3;
-    private static readonly TimeSpan MaintenanceLockoutDuration = TimeSpan.FromMinutes(30);
-
-    // Endpoint mismatch tracking for escalating blocks
-    private readonly ConcurrentDictionary<string, EndpointMismatchInfo> _endpointMismatches = new();
-    private const int MismatchThreshold = 20;  // Block after 20 mismatches
-
-    private sealed class EndpointMismatchInfo
-    {
-        public int Count;
-        public int BlockLevel;  // 0=none, 1=5min, 2=15min, 3=24h
-        public DateTime BlockUntil;
-        public DateTime LastMismatch;
-    }
 
     /// <summary>
     /// Gets whether maintenance mode is currently enabled.
@@ -164,7 +143,7 @@ public sealed class TunnelV2 : IDisposable
         _mappings = new ConcurrentDictionary<short, TunnelClient>();
         _requestCounter = new ConcurrentDictionary<int, int>();
 
-        // Create UDP socket with IPv4 only (games don't support IPv6)
+        // Create UDP socket
         _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _socket.Bind(new IPEndPoint(IPAddress.Any, _options.TunnelV2.Port));
         TrySuppressIcmpErrors();
@@ -286,8 +265,7 @@ public sealed class TunnelV2 : IDisposable
             }
             else if (path.StartsWith("/maintenance/", StringComparison.OrdinalIgnoreCase))
             {
-                var clientIp = request.RemoteEndPoint?.Address.ToString() ?? "unknown";
-                HandleMaintenanceRequest(path, response, clientIp);
+                HandleMaintenanceRequest(path, response);
             }
             else
             {
@@ -354,7 +332,7 @@ public sealed class TunnelV2 : IDisposable
         }
 
         // Return allocated IDs as JSON array
-        var json = JsonSerializer.Serialize(allocatedIds, AppJsonContext.Default.ListInt16);
+        var json = JsonSerializer.Serialize(allocatedIds);
         var buffer = Encoding.UTF8.GetBytes(json);
 
         response.ContentType = "application/json";
@@ -384,10 +362,9 @@ public sealed class TunnelV2 : IDisposable
     }
 
     /// <summary>
-    /// Handles a maintenance mode toggle request with brute-force protection.
-    /// Uses constant-time comparison and IP-based lockout.
+    /// Handles a maintenance mode toggle request.
     /// </summary>
-    private void HandleMaintenanceRequest(string path, HttpListenerResponse response, string clientIp)
+    private void HandleMaintenanceRequest(string path, HttpListenerResponse response)
     {
         if (string.IsNullOrEmpty(_options.Maintenance.Password))
         {
@@ -395,52 +372,15 @@ public sealed class TunnelV2 : IDisposable
             return;
         }
 
-        // Check brute-force lockout
-        if (_maintenanceAttempts.TryGetValue(clientIp, out var attempt) && DateTime.UtcNow < attempt.LockoutUntil)
-        {
-            response.StatusCode = 429; // Too Many Requests
-            return;
-        }
-
         var parts = path.Split('/');
-        if (parts.Length < 3)
+        if (parts.Length < 3 || parts[2] != _options.Maintenance.Password)
         {
             response.StatusCode = 401;
             return;
         }
-
-        var providedPassword = parts[2];
-
-        // Use constant-time comparison to prevent timing attacks
-        var isValid = !string.IsNullOrEmpty(providedPassword) &&
-                      CryptographicOperations.FixedTimeEquals(
-                          Encoding.UTF8.GetBytes(providedPassword),
-                          Encoding.UTF8.GetBytes(_options.Maintenance.Password));
-
-        if (!isValid)
-        {
-            // Track failed attempt
-            var attempts = _maintenanceAttempts.AddOrUpdate(
-                clientIp,
-                _ => (1, DateTime.MinValue),
-                (_, existing) => (existing.Attempts + 1, existing.LockoutUntil));
-
-            if (attempts.Attempts >= MaxMaintenanceAttempts)
-            {
-                _maintenanceAttempts[clientIp] = (attempts.Attempts, DateTime.UtcNow.Add(MaintenanceLockoutDuration));
-                _logger.Warning("[V2] Maintenance endpoint locked out for IP {IP} after {Attempts} failed attempts",
-                    IpAnonymizer.Anonymize(clientIp), attempts.Attempts);
-            }
-
-            response.StatusCode = 401;
-            return;
-        }
-
-        // Clear failed attempts on success
-        _maintenanceAttempts.TryRemove(clientIp, out _);
 
         _maintenanceMode = true;
-        _logger.Warning("V2 Maintenance mode ENABLED via HTTP from {IP}", IpAnonymizer.Anonymize(clientIp));
+        _logger.Warning("V2 Maintenance mode ENABLED via HTTP");
         response.StatusCode = 200;
     }
 
@@ -503,14 +443,6 @@ public sealed class TunnelV2 : IDisposable
     /// </summary>
     private void ProcessPacket(ReadOnlySpan<byte> buffer, IPEndPoint remoteEndPoint)
     {
-        // Check if IP is blocked for endpoint mismatch abuse
-        var ipKey = remoteEndPoint.Address.ToString();
-        if (_endpointMismatches.TryGetValue(ipKey, out var mismatchInfo) &&
-            DateTime.UtcNow < mismatchInfo.BlockUntil)
-        {
-            return; // Silently drop - IP is blocked
-        }
-
         // Parse IDs in network byte order (big-endian)
         var senderId = IPAddress.NetworkToHostOrder(BitConverter.ToInt16(buffer));
         var receiverId = IPAddress.NetworkToHostOrder(BitConverter.ToInt16(buffer.Slice(2)));
@@ -528,8 +460,6 @@ public sealed class TunnelV2 : IDisposable
         {
             if (buffer.Length == PingPacketSize)
             {
-                ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V2PingReceived,
-                    $"Ping request received ({buffer.Length} bytes)", TunnelSource.V2);
                 ProcessPing(buffer, remoteEndPoint);
             }
             return;
@@ -549,8 +479,6 @@ public sealed class TunnelV2 : IDisposable
             _options.Security.MaxPingsPerIp,
             _options.Security.MaxPingsGlobal))
         {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.BlockedByRateLimit,
-                "Ping blocked by rate limit", TunnelSource.V2);
             return;
         }
 
@@ -560,13 +488,10 @@ public sealed class TunnelV2 : IDisposable
         try
         {
             _socket.SendTo(response, SocketFlags.None, remoteEndPoint);
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V2PingResponse,
-                $"Ping response sent ({PingResponseSize} bytes)", TunnelSource.V2);
         }
-        catch (SocketException ex)
+        catch (SocketException)
         {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.SendFailed,
-                $"Ping response failed: {ex.SocketErrorCode}", TunnelSource.V2);
+            // Ignore
         }
     }
 
@@ -583,23 +508,16 @@ public sealed class TunnelV2 : IDisposable
         {
             // Look up sender in mappings
             if (!_mappings.TryGetValue(senderId, out var sender))
-            {
-                ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.ConnectionRejected,
-                    $"Unknown sender ID {senderId} - no slot allocated", TunnelSource.V2);
-                return;
-            }
+                return; // Unknown sender - reject
 
             // First packet from this sender - assign endpoint
             if (sender.RemoteEndPoint == null)
             {
                 sender.RemoteEndPoint = new IPEndPoint(remoteEndPoint.Address, remoteEndPoint.Port);
-                ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V2EndpointAssigned,
-                    $"Endpoint assigned to slot {senderId}", TunnelSource.V2);
             }
             // Endpoint mismatch - reject (V2 doesn't allow endpoint changes)
             else if (!remoteEndPoint.Equals(sender.RemoteEndPoint))
             {
-                HandleEndpointMismatch(remoteEndPoint, senderId, sender.RemoteEndPoint);
                 return;
             }
 
@@ -611,22 +529,15 @@ public sealed class TunnelV2 : IDisposable
                 receiver.RemoteEndPoint != null &&
                 !receiver.RemoteEndPoint.Equals(sender.RemoteEndPoint))
             {
-                // Update receiver's activity - they're still part of an active game
-                receiver.UpdateLastActivity();
-
                 try
                 {
                     _socket.SendTo(buffer, SocketFlags.None, receiver.RemoteEndPoint);
                     Interlocked.Increment(ref _packetsRelayed);
                     Interlocked.Add(ref _bytesRelayed, buffer.Length);
-
-                    ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V2PacketRelayed,
-                        $"Packet relayed to {receiverId} ({buffer.Length} bytes)", TunnelSource.V2);
                 }
-                catch (SocketException ex)
+                catch (SocketException)
                 {
-                    ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.SendFailed,
-                        $"Relay to {receiverId} failed: {ex.SocketErrorCode}", TunnelSource.V2);
+                    // Ignore
                 }
             }
         }
@@ -638,52 +549,9 @@ public sealed class TunnelV2 : IDisposable
     private static bool IsValidRemoteEndPoint(IPEndPoint endPoint)
     {
         return endPoint.Port != 0 &&
-               !IPAddress.IsLoopback(endPoint.Address) &&
+               !endPoint.Address.Equals(IPAddress.Loopback) &&
                !endPoint.Address.Equals(IPAddress.Any) &&
                !endPoint.Address.Equals(IPAddress.Broadcast);
-    }
-
-    /// <summary>
-    /// Handles endpoint mismatch with escalating block system.
-    /// After 20 mismatches: 5 min block, then 15 min, then 24h.
-    /// </summary>
-    private void HandleEndpointMismatch(IPEndPoint remoteEndPoint, short slotId, IPEndPoint expectedEndPoint)
-    {
-        var ipKey = remoteEndPoint.Address.ToString();
-        var info = _endpointMismatches.GetOrAdd(ipKey, _ => new EndpointMismatchInfo());
-
-        info.Count++;
-        info.LastMismatch = DateTime.UtcNow;
-
-        // Check if threshold reached
-        if (info.Count >= MismatchThreshold)
-        {
-            // Escalate block level
-            info.BlockLevel = Math.Min(info.BlockLevel + 1, 3);
-
-            // Set block duration based on level
-            var blockDuration = info.BlockLevel switch
-            {
-                1 => TimeSpan.FromMinutes(5),
-                2 => TimeSpan.FromMinutes(15),
-                _ => TimeSpan.FromHours(24)
-            };
-
-            info.BlockUntil = DateTime.UtcNow.Add(blockDuration);
-            info.Count = 0;  // Reset count for next escalation
-
-            _logger.Warning("[V2] IP {IP} blocked for {Duration} (level {Level}) - {Threshold} endpoint mismatches",
-                IpAnonymizer.Anonymize(ipKey), blockDuration, info.BlockLevel, MismatchThreshold);
-
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.AddedToBlacklist,
-                $"Blocked for {blockDuration.TotalMinutes}min (level {info.BlockLevel}) - endpoint mismatch abuse", TunnelSource.V2);
-        }
-        else if (info.Count == 1 || info.Count % 5 == 0)
-        {
-            // Log only first mismatch and every 5th to reduce log spam
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.ConnectionRejected,
-                $"Endpoint mismatch for slot {slotId} - expected {expectedEndPoint} ({info.Count}/{MismatchThreshold})", TunnelSource.V2);
-        }
     }
 
     /// <summary>
@@ -711,17 +579,6 @@ public sealed class TunnelV2 : IDisposable
                 if (client.IsTimedOut)
                 {
                     expiredIds.Add(id);
-
-                    // Log completed session if client had an endpoint (was actually used)
-                    if (client.RemoteEndPoint != null)
-                    {
-                        ConnectionTracer.Instance.LogEvent(client.RemoteEndPoint, TraceEventType.ConnectionTimeout,
-                            $"Session timed out after {client.SessionDuration.TotalSeconds:F0}s", TunnelSource.V2);
-
-                        SessionLog.V2.LogSession(
-                            client.RemoteEndPoint.Address.ToString(),
-                            client.SessionDuration);
-                    }
                 }
             }
 
@@ -747,19 +604,11 @@ public sealed class TunnelV2 : IDisposable
 
     /// <summary>
     /// Sends heartbeat to master server.
-    /// Skips heartbeat during maintenance mode so the server is removed from the list.
     /// </summary>
     private async Task SendHeartbeatAsync()
     {
         if (!_options.MasterServer.Enabled)
             return;
-
-        // Skip heartbeat during maintenance - server will be removed from master list
-        if (_maintenanceMode)
-        {
-            _logger.Debug("V2 master server heartbeat skipped (maintenance mode)");
-            return;
-        }
 
         try
         {
@@ -779,7 +628,6 @@ public sealed class TunnelV2 : IDisposable
 
     /// <summary>
     /// Builds master server URL.
-    /// Note: maintenance parameter removed as master server doesn't support it.
     /// </summary>
     private string BuildMasterServerUrl(int clientCount)
     {
@@ -789,7 +637,8 @@ public sealed class TunnelV2 : IDisposable
             ["name"] = _options.Server.Name,
             ["port"] = _options.TunnelV2.Port.ToString(),
             ["clients"] = clientCount.ToString(),
-            ["maxclients"] = _options.Server.MaxClients.ToString()
+            ["maxclients"] = _options.Server.MaxClients.ToString(),
+            ["maintenance"] = _maintenanceMode ? "1" : "0"
         };
 
         if (!string.IsNullOrEmpty(_options.MasterServer.Password))

@@ -15,22 +15,11 @@ public sealed class TunnelClient
 {
     private long _lastActivityTicks;
     private readonly int _timeoutSeconds;
-    private readonly DateTime _createdAt;
 
     /// <summary>
     /// The client's remote IP endpoint (IP address and port).
     /// </summary>
     public IPEndPoint? RemoteEndPoint { get; set; }
-
-    /// <summary>
-    /// Gets the time when this client was created.
-    /// </summary>
-    public DateTime CreatedAt => _createdAt;
-
-    /// <summary>
-    /// Gets the duration since the client was created.
-    /// </summary>
-    public TimeSpan SessionDuration => DateTime.UtcNow - _createdAt;
 
     /// <summary>
     /// Creates a new tunnel client with the specified timeout.
@@ -39,7 +28,6 @@ public sealed class TunnelClient
     public TunnelClient(int timeoutSeconds = 60)
     {
         _timeoutSeconds = timeoutSeconds;
-        _createdAt = DateTime.UtcNow;
         UpdateLastActivity();
     }
 

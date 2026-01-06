@@ -2,7 +2,7 @@ namespace CnCNetServer.Configuration;
 
 /// <summary>
 /// Root configuration options for the CnCNet tunnel server.
-/// Populated from command-line arguments via CommandLineOptions.
+/// Maps to the appsettings.json structure.
 /// </summary>
 public sealed class ServiceOptions
 {
@@ -15,7 +15,6 @@ public sealed class ServiceOptions
     public SecurityOptions Security { get; set; } = new();
     public WebMonitorOptions WebMonitor { get; set; } = new();
     public LoggingOptions Logging { get; set; } = new();
-    public DiagnosticsOptions Diagnostics { get; set; } = new();
 }
 
 /// <summary>
@@ -226,41 +225,4 @@ public sealed class LoggingOptions
     /// Minimum log level (Verbose, Debug, Information, Warning, Error, Fatal).
     /// </summary>
     public string MinimumLevel { get; set; } = "Information";
-}
-
-/// <summary>
-/// Diagnostics configuration options.
-/// </summary>
-public sealed class DiagnosticsOptions
-{
-    /// <summary>
-    /// Enable advanced features like IP tracing and runtime server name change (--rowtagmode flag).
-    /// </summary>
-    public bool RowtagMode { get; set; }
-
-    /// <summary>
-    /// Enable IP trace UI in web dashboard (requires --rowtagmode).
-    /// </summary>
-    public bool TraceAllConnections { get; set; }
-
-    /// <summary>
-    /// Enable tracing of ALL IPs from startup (--trace-all flag).
-    /// </summary>
-    public bool TraceAllFromStart { get; set; }
-
-    /// <summary>
-    /// Enable tracing of important events only (--trace-important flag).
-    /// Resource-efficient mode that only captures registrations, timeouts, blocks, and errors.
-    /// </summary>
-    public bool TraceImportantOnly { get; set; }
-
-    /// <summary>
-    /// Path to log file for file logging (--logfile flag).
-    /// </summary>
-    public string? LogFile { get; set; }
-
-    /// <summary>
-    /// Path to trace file for IP trace events (--trace-file flag).
-    /// </summary>
-    public string? TraceFile { get; set; }
 }
