@@ -5,8 +5,8 @@ using Serilog.Events;
 namespace CnCNetServer.Logging;
 
 /// <summary>
-/// In-memory log sink that keeps recent log entries for display in the web dashboard.
-/// Thread-safe for concurrent access. Old entries are removed when max count is reached.
+/// In-memory log sink that keeps the last N log entries for display in the web dashboard.
+/// Thread-safe for concurrent access.
 /// </summary>
 public sealed class InMemoryLogSink : ILogEventSink
 {
@@ -14,26 +14,11 @@ public sealed class InMemoryLogSink : ILogEventSink
     private readonly int _maxEntries;
 
     /// <summary>
-    /// Singleton instance for global access (1000 entries max).
+    /// Singleton instance for global access.
     /// </summary>
-    public static InMemoryLogSink Instance { get; } = new(1000);
+    public static InMemoryLogSink Instance { get; } = new(50);
 
-    /// <summary>
-    /// Current display filter level. Entries below this level are hidden (not deleted).
-    /// </summary>
-    public LogEventLevel DisplayLevel { get; set; } = LogEventLevel.Information;
-
-    /// <summary>
-    /// Current display limit for entries shown in UI.
-    /// </summary>
-    public int DisplayLimit { get; set; } = 50;
-
-    /// <summary>
-    /// Current view mode for the log panel (logs, v3sessions, v2sessions).
-    /// </summary>
-    public string DisplayView { get; set; } = "logs";
-
-    public InMemoryLogSink(int maxEntries = 1000)
+    public InMemoryLogSink(int maxEntries = 50)
     {
         _maxEntries = maxEntries;
     }
@@ -43,16 +28,14 @@ public sealed class InMemoryLogSink : ILogEventSink
         var entry = new LogEntry
         {
             Timestamp = logEvent.Timestamp.LocalDateTime,
-            TimestampUtc = logEvent.Timestamp.UtcDateTime,
             Level = logEvent.Level.ToString(),
-            LevelValue = (int)logEvent.Level,
             Message = logEvent.RenderMessage(),
             LevelClass = GetLevelClass(logEvent.Level)
         };
 
         _entries.Enqueue(entry);
 
-        // Remove oldest entries when max count is exceeded
+        // Keep only the last N entries
         while (_entries.Count > _maxEntries)
         {
             _entries.TryDequeue(out _);
@@ -60,40 +43,11 @@ public sealed class InMemoryLogSink : ILogEventSink
     }
 
     /// <summary>
-    /// Gets the most recent log entries filtered by current DisplayLevel and limited by DisplayLimit.
+    /// Gets the most recent log entries.
     /// </summary>
     public IEnumerable<LogEntry> GetEntries()
     {
-        var minLevel = (int)DisplayLevel;
-        return _entries
-            .Where(e => e.LevelValue >= minLevel)
-            .Reverse()
-            .Take(DisplayLimit)
-            .ToList();
-    }
-
-    /// <summary>
-    /// Gets available display limits for UI dropdown.
-    /// </summary>
-    public static IEnumerable<int> GetAvailableLimits()
-    {
-        yield return 50;
-        yield return 100;
-        yield return 200;
-        yield return 500;
-        yield return 1000;
-    }
-
-    /// <summary>
-    /// Gets all available log levels for UI dropdown.
-    /// </summary>
-    public static IEnumerable<(string Name, int Value)> GetAvailableLevels()
-    {
-        yield return ("Verbose", (int)LogEventLevel.Verbose);
-        yield return ("Debug", (int)LogEventLevel.Debug);
-        yield return ("Information", (int)LogEventLevel.Information);
-        yield return ("Warning", (int)LogEventLevel.Warning);
-        yield return ("Error", (int)LogEventLevel.Error);
+        return _entries.Reverse().ToList();
     }
 
     private static string GetLevelClass(LogEventLevel level) => level switch
@@ -114,9 +68,7 @@ public sealed class InMemoryLogSink : ILogEventSink
 public sealed class LogEntry
 {
     public DateTime Timestamp { get; init; }
-    public DateTime TimestampUtc { get; init; }
     public required string Level { get; init; }
-    public int LevelValue { get; init; }
     public required string Message { get; init; }
     public required string LevelClass { get; init; }
 }

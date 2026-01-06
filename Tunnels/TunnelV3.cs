@@ -4,8 +4,6 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using CnCNetServer.Configuration;
-using CnCNetServer.Diagnostics;
-using CnCNetServer.Logging;
 using CnCNetServer.Models;
 using CnCNetServer.Security;
 using Serilog;
@@ -89,22 +87,6 @@ public sealed class TunnelV3 : IDisposable
     }
 
     /// <summary>
-    /// Gets the number of established clients (sessions active for more than 2 minutes).
-    /// These are likely real game sessions, not just slot reservations.
-    /// </summary>
-    public int EstablishedClients
-    {
-        get
-        {
-            lock (_mappingsLock)
-            {
-                return _mappings.Values
-                    .Count(c => c.RemoteEndPoint != null && c.SessionDuration.TotalMinutes >= 2);
-            }
-        }
-    }
-
-    /// <summary>
     /// Gets the number of unique IP addresses connected.
     /// </summary>
     public int UniqueIpCount
@@ -153,7 +135,7 @@ public sealed class TunnelV3 : IDisposable
                 Encoding.UTF8.GetBytes(_options.Maintenance.Password));
         }
 
-        // Create UDP socket with IPv4 only (games don't support IPv6)
+        // Create UDP socket with dual-mode disabled (IPv4 only for game compatibility)
         _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
         _socket.Bind(new IPEndPoint(IPAddress.Any, _options.TunnelV3.Port));
 
@@ -231,28 +213,16 @@ public sealed class TunnelV3 : IDisposable
 
         // Validate remote endpoint - reject loopback, broadcast, and invalid addresses
         if (!IsValidRemoteEndPoint(remoteEndPoint))
-        {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.InvalidPacket,
-                $"Invalid endpoint rejected (loopback/broadcast/invalid)", TunnelSource.V3);
             return;
-        }
 
         // Validate packet format against known V3 protocol patterns
         if (!TunnelV3PacketValidation.IsValidPacket(buffer, buffer.Length, senderId, receiverId))
-        {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.InvalidPacket,
-                $"Packet validation failed: size={buffer.Length}, senderId={senderId}, receiverId={receiverId}", TunnelSource.V3);
             return;
-        }
 
         // Check DDoS protection - blocked IPs
         if (_options.TunnelV3.DDoSProtectionEnabled &&
             !_securityManager.IsConnectionAllowed(remoteEndPoint.Address))
-        {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.ConnectionRejected,
-                "Blocked by security manager (blacklist or rate limit)", TunnelSource.V3);
             return;
-        }
 
         // Handle command packets (senderId=0, receiverId=MaxValue)
         if (senderId == 0 && receiverId == uint.MaxValue && buffer.Length >= CommandPacketMinSize)
@@ -266,8 +236,6 @@ public sealed class TunnelV3 : IDisposable
         {
             if (buffer.Length == PingPacketSize)
             {
-                ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V3PingReceived,
-                    $"Ping request received ({buffer.Length} bytes)", TunnelSource.V3);
                 ProcessPing(buffer, remoteEndPoint);
             }
             return;
@@ -275,11 +243,7 @@ public sealed class TunnelV3 : IDisposable
 
         // Reject packets where sender equals receiver (invalid)
         if (senderId == receiverId)
-        {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.InvalidPacket,
-                $"Sender equals receiver rejected: id={senderId}", TunnelSource.V3);
             return;
-        }
 
         // Handle registration and relay packets
         ProcessDataPacket(buffer, senderId, receiverId, remoteEndPoint);
@@ -297,8 +261,6 @@ public sealed class TunnelV3 : IDisposable
                 _options.Security.MaxPingsPerIp,
                 _options.Security.MaxPingsGlobal))
         {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.BlockedByRateLimit,
-                "Ping blocked by rate limit", TunnelSource.V3);
             return;
         }
 
@@ -310,19 +272,15 @@ public sealed class TunnelV3 : IDisposable
         try
         {
             _socket.SendTo(response, SocketFlags.None, remoteEndPoint);
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V3PingResponse,
-                $"Ping response sent ({PingResponseSize} bytes)", TunnelSource.V3);
         }
-        catch (SocketException ex)
+        catch (SocketException)
         {
-            ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.SendFailed,
-                $"Ping response failed: {ex.SocketErrorCode}", TunnelSource.V3);
+            // Ignore send failures (client may have disconnected)
         }
     }
 
     /// <summary>
     /// Processes a data packet (registration or relay).
-    /// PERFORMANCE: SendTo is performed OUTSIDE the lock to prevent blocking other packets.
     /// </summary>
     private void ProcessDataPacket(
         ReadOnlySpan<byte> buffer,
@@ -331,26 +289,20 @@ public sealed class TunnelV3 : IDisposable
         IPEndPoint remoteEndPoint)
     {
         var ddosEnabled = _options.TunnelV3.DDoSProtectionEnabled;
-        IPEndPoint? targetEndPoint = null;
-        bool shouldRelay = false;
-        int bufferLength = buffer.Length;
 
         lock (_mappingsLock)
         {
             // Try to find existing sender mapping
             if (_mappings.TryGetValue(senderId, out var sender))
             {
-                // Verify the sender's IP address matches (port changes allowed for NAT rebinding)
-                bool ipMatches = sender.RemoteEndPoint == null ||
-                    remoteEndPoint.Address.Equals(sender.RemoteEndPoint.Address);
-
-                if (!ipMatches)
+                // Verify the sender's endpoint matches
+                if (sender.RemoteEndPoint != null && !remoteEndPoint.Equals(sender.RemoteEndPoint))
                 {
-                    // Different IP - only allow takeover if timed out and not in maintenance
+                    // Endpoint mismatch - only allow takeover if timed out and not in maintenance
                     if (sender.IsTimedOut && !_maintenanceMode)
                     {
                         // Release old connection tracking
-                        if (ddosEnabled && sender.RemoteEndPoint != null)
+                        if (ddosEnabled)
                             _securityManager.ReleaseConnection(sender.RemoteEndPoint.Address);
 
                         // Check if new connection is allowed (IP limit)
@@ -362,13 +314,8 @@ public sealed class TunnelV3 : IDisposable
                     }
                     else
                     {
-                        return; // Reject - different IP for active session
+                        return; // Reject - different endpoint for active session
                     }
-                }
-                else if (sender.RemoteEndPoint != null && sender.RemoteEndPoint.Port != remoteEndPoint.Port)
-                {
-                    // Same IP but different port (NAT rebinding) - update the port
-                    sender.RemoteEndPoint = new IPEndPoint(remoteEndPoint.Address, remoteEndPoint.Port);
                 }
 
                 sender.UpdateLastActivity();
@@ -377,62 +324,36 @@ public sealed class TunnelV3 : IDisposable
             {
                 // New client registration
                 if (_mappings.Count >= _options.Server.MaxClients || _maintenanceMode)
-                {
-                    ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.ConnectionRejected,
-                        _maintenanceMode ? "Rejected: maintenance mode" : "Rejected: server full", TunnelSource.V3);
                     return;
-                }
 
                 // Check IP limit (DDoS protection)
                 if (ddosEnabled &&
                     !_securityManager.TrackConnection(remoteEndPoint.Address, _options.TunnelV3.IpLimit))
-                {
-                    ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.BlockedByIpLimit,
-                        $"Rejected: IP limit exceeded (limit: {_options.TunnelV3.IpLimit})", TunnelSource.V3);
                     return;
-                }
 
                 sender = new TunnelClient(
                     new IPEndPoint(remoteEndPoint.Address, remoteEndPoint.Port),
                     _options.Server.ClientTimeout);
 
                 _mappings[senderId] = sender;
-
-                ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V3Registration,
-                    $"New client registered with ID {senderId}", TunnelSource.V3);
             }
 
-            // If this is a relay packet (has receiver), prepare for forwarding OUTSIDE lock
-            if (receiverId != 0 &&
-                _mappings.TryGetValue(receiverId, out var receiver) &&
-                receiver.RemoteEndPoint != null &&
-                !receiver.RemoteEndPoint.Equals(sender.RemoteEndPoint))
+            // If this is a relay packet (has receiver), forward it
+            if (receiverId != 0 && _mappings.TryGetValue(receiverId, out var receiver))
             {
-                // Update receiver's activity - they're still part of an active game
-                receiver.UpdateLastActivity();
-
-                // Copy endpoint for use outside lock
-                targetEndPoint = receiver.RemoteEndPoint;
-                shouldRelay = true;
-            }
-        }
-
-        // PERFORMANCE: SendTo is done OUTSIDE the lock to prevent blocking other packets
-        if (shouldRelay && targetEndPoint != null)
-        {
-            try
-            {
-                _socket.SendTo(buffer, SocketFlags.None, targetEndPoint);
-                Interlocked.Increment(ref _packetsRelayed);
-                Interlocked.Add(ref _bytesRelayed, bufferLength);
-
-                ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.V3PacketRelayed,
-                    $"Packet relayed to {receiverId} ({bufferLength} bytes)", TunnelSource.V3);
-            }
-            catch (SocketException ex)
-            {
-                ConnectionTracer.Instance.LogEvent(remoteEndPoint, TraceEventType.SendFailed,
-                    $"Relay to {receiverId} failed: {ex.SocketErrorCode}", TunnelSource.V3);
+                if (receiver.RemoteEndPoint != null && !receiver.RemoteEndPoint.Equals(sender.RemoteEndPoint))
+                {
+                    try
+                    {
+                        _socket.SendTo(buffer, SocketFlags.None, receiver.RemoteEndPoint);
+                        Interlocked.Increment(ref _packetsRelayed);
+                        Interlocked.Add(ref _bytesRelayed, buffer.Length);
+                    }
+                    catch (SocketException)
+                    {
+                        // Ignore send failures
+                    }
+                }
             }
         }
     }
@@ -477,7 +398,7 @@ public sealed class TunnelV3 : IDisposable
     private static bool IsValidRemoteEndPoint(IPEndPoint endPoint)
     {
         return endPoint.Port != 0 &&
-               !IPAddress.IsLoopback(endPoint.Address) &&
+               !endPoint.Address.Equals(IPAddress.Loopback) &&
                !endPoint.Address.Equals(IPAddress.Any) &&
                !endPoint.Address.Equals(IPAddress.Broadcast);
     }
@@ -499,32 +420,18 @@ public sealed class TunnelV3 : IDisposable
     {
         var expiredIds = new List<uint>();
         var ddosEnabled = _options.TunnelV3.DDoSProtectionEnabled;
-        var timeout = _options.Server.ClientTimeout;
 
         lock (_mappingsLock)
         {
-
             foreach (var (id, client) in _mappings)
             {
                 if (client.IsTimedOut)
                 {
                     expiredIds.Add(id);
-
-                    // Log completed session if client had an endpoint
-                    if (client.RemoteEndPoint != null)
+                    // Release connection tracking
+                    if (ddosEnabled && client.RemoteEndPoint != null)
                     {
-                        ConnectionTracer.Instance.LogEvent(client.RemoteEndPoint, TraceEventType.ConnectionTimeout,
-                            $"Session timed out after {client.SessionDuration.TotalSeconds:F0}s, TimeSinceLastActivity={client.TimeSinceLastActivity.TotalSeconds:F1}s, Timeout={timeout}s", TunnelSource.V3);
-
-                        SessionLog.V3.LogSession(
-                            client.RemoteEndPoint.Address.ToString(),
-                            client.SessionDuration);
-
-                        // Release connection tracking
-                        if (ddosEnabled)
-                        {
-                            _securityManager.ReleaseConnection(client.RemoteEndPoint.Address);
-                        }
+                        _securityManager.ReleaseConnection(client.RemoteEndPoint.Address);
                     }
                 }
             }
@@ -543,19 +450,11 @@ public sealed class TunnelV3 : IDisposable
 
     /// <summary>
     /// Sends a heartbeat announcement to the master server.
-    /// Skips heartbeat during maintenance mode so the server is removed from the list.
     /// </summary>
     private async Task SendHeartbeatAsync()
     {
         if (!_options.MasterServer.Enabled)
             return;
-
-        // Skip heartbeat during maintenance - server will be removed from master list
-        if (_maintenanceMode)
-        {
-            _logger.Debug("V3 master server heartbeat skipped (maintenance mode)");
-            return;
-        }
 
         try
         {
@@ -575,8 +474,6 @@ public sealed class TunnelV3 : IDisposable
 
     /// <summary>
     /// Builds the master server announcement URL with current status.
-    /// Note: In maintenance mode, we skip the heartbeat entirely to avoid
-    /// sending unsupported parameters to the master server.
     /// </summary>
     private string BuildMasterServerUrl(int clientCount)
     {
@@ -586,7 +483,8 @@ public sealed class TunnelV3 : IDisposable
             ["name"] = _options.Server.Name,
             ["port"] = _options.TunnelV3.Port.ToString(),
             ["clients"] = clientCount.ToString(),
-            ["maxclients"] = _options.Server.MaxClients.ToString()
+            ["maxclients"] = _options.Server.MaxClients.ToString(),
+            ["maintenance"] = _maintenanceMode ? "1" : "0"
         };
 
         if (!string.IsNullOrEmpty(_options.MasterServer.Password))

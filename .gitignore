@@ -204,28 +204,3 @@ FakesAssemblies/
 
 # Visual Studio 6 workspace options file
 *.opt
-
-# Application-specific
-logs/
-*.log
-
-# IDE
-.idea/
-*.swp
-*.swo
-
-# macOS
-.DS_Store
-
-# Rider
-.idea/
-
-# JetBrains Rider
-*.sln.iml
-
-# Published output
-publish/
-out/
-
-# Session handover documents (internal use only)
-SESSION_HANDOVER.md
