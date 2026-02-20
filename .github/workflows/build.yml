@@ -1,0 +1,120 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            name: linux-x64
+          - os: ubuntu-latest
+            rid: linux-arm64
+            name: linux-arm64
+          - os: windows-latest
+            rid: win-x64
+            name: win-x64
+          - os: windows-latest
+            rid: win-arm64
+            name: win-arm64
+          - os: macos-latest
+            rid: osx-x64
+            name: osx-x64
+          - os: macos-latest
+            rid: osx-arm64
+            name: osx-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Restore dependencies
+        run: dotnet restore CnCNetServer.csproj
+
+      - name: Publish
+        run: dotnet publish CnCNetServer.csproj -c Release -r ${{ matrix.rid }} -o publish/
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd publish
+          zip -r ../cncnet-server-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.zip .
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish/* -DestinationPath cncnet-server-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.zip
+
+      - name: Generate SHA256 checksums (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          sha256sum cncnet-server-*.zip >> checksums-${{ matrix.name }}.txt
+
+      - name: Generate SHA256 checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-FileHash cncnet-server-*.zip -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)"
+          } | Out-File -FilePath checksums-${{ matrix.name }}.txt -Encoding utf8
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: |
+            cncnet-server-*.zip
+            checksums-*.txt
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Merge checksums
+        run: |
+          cat artifacts/checksums-*.txt | sort > checksums.txt
+          rm artifacts/checksums-*.txt
+          mv checksums.txt artifacts/
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.VERSION }}
+          generate_release_notes: true
+          files: |
+            artifacts/*.zip
+            artifacts/checksums.txt

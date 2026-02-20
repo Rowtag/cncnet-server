@@ -25,7 +25,7 @@ public sealed class ConnectionTracer
 {
     private readonly ConcurrentQueue<TraceEvent> _events = new();
     private readonly ConcurrentQueue<TraceEvent> _importantEvents = new();
-    private readonly ConcurrentDictionary<int, bool> _tracedIps = new();
+    private readonly ConcurrentDictionary<string, bool> _tracedIps = new();
     private const int MaxEvents = 1000;
     private const int MaxImportantEvents = 500;
     private const int MaxTracedIps = 10;
@@ -64,11 +64,8 @@ public sealed class ConnectionTracer
     /// <summary>
     /// Gets the list of currently traced IP addresses.
     /// </summary>
-    public IEnumerable<string> TracedIps => _tracedIps.Keys
-        .Select(hash => _ipHashToString.TryGetValue(hash, out var ip) ? ip : $"hash:{hash}");
+    public IEnumerable<string> TracedIps => _tracedIps.Keys;
 
-    // Reverse lookup for display
-    private readonly ConcurrentDictionary<int, string> _ipHashToString = new();
 
     /// <summary>
     /// Configures file logging for trace events.
@@ -156,9 +153,7 @@ public sealed class ConnectionTracer
         if (_tracedIps.Count >= MaxTracedIps)
             return false;
 
-        var hash = address.GetHashCode();
-        _ipHashToString[hash] = ipAddress;
-        _tracedIps[hash] = true;
+        _tracedIps[address.ToString()] = true;
 
         // Log that tracing started
         LogEvent(address, TraceEventType.TracingStarted, "Tracing started for this IP");
@@ -174,16 +169,13 @@ public sealed class ConnectionTracer
         if (!IPAddress.TryParse(ipAddress, out var address))
             return false;
 
-        var hash = address.GetHashCode();
-
         // Log that tracing stopped before removing
-        if (_tracedIps.ContainsKey(hash))
+        if (_tracedIps.ContainsKey(address.ToString()))
         {
             LogEvent(address, TraceEventType.TracingStopped, "Tracing stopped for this IP");
         }
 
-        _tracedIps.TryRemove(hash, out _);
-        _ipHashToString.TryRemove(hash, out _);
+        _tracedIps.TryRemove(address.ToString(), out _);
         return true;
     }
 
@@ -193,7 +185,6 @@ public sealed class ConnectionTracer
     public void StopAllTracing()
     {
         _tracedIps.Clear();
-        _ipHashToString.Clear();
         _events.Clear();
         _importantEvents.Clear();
     }
@@ -203,7 +194,7 @@ public sealed class ConnectionTracer
     /// </summary>
     public bool IsTraced(IPAddress address)
     {
-        return TraceAllIps || _tracedIps.ContainsKey(address.GetHashCode());
+        return TraceAllIps || _tracedIps.ContainsKey(address.ToString());
     }
 
     /// <summary>

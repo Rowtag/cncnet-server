@@ -18,7 +18,12 @@ internal static class TunnelV3PacketValidation
     /// Gets or sets whether packet validation is enabled.
     /// Can be toggled at runtime via the web dashboard.
     /// </summary>
-    public static bool Enabled { get; set; } = true;
+    private static volatile bool _enabled = true;
+    public static bool Enabled
+    {
+        get => _enabled;
+        set => _enabled = value;
+    }
 
     /// <summary>
     /// Validates that a packet matches one of the legitimate V3 tunnel formats.
