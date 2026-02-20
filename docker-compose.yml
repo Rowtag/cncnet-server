@@ -5,8 +5,8 @@ services:
     restart: unless-stopped
 
     volumes:
-      # Local config file (copy appsettings.local.example.json and fill in your values)
-      - ./appsettings.local.json:/app/appsettings.local.json:ro
+      # Mount your appsettings.json with your configuration
+      - ./appsettings.json:/app/appsettings.json:ro
       # Persistent log files
       - ./logs:/app/logs
 
