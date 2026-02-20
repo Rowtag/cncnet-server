@@ -1,0 +1,38 @@
+services:
+  cncnet-server:
+    image: ghcr.io/rowtag/cncnet-server:latest
+    container_name: cncnet-server
+    restart: unless-stopped
+
+    environment:
+      - CNCNET_SERVER__NAME=${CNCNET_SERVER__NAME}
+      - CNCNET_SERVER__MAXCLIENTS=${CNCNET_SERVER__MAXCLIENTS}
+      - CNCNET_SERVER__CLIENTTIMEOUT=${CNCNET_SERVER__CLIENTTIMEOUT}
+      - CNCNET_MAINTENANCE__PASSWORD=${CNCNET_MAINTENANCE__PASSWORD}
+      - CNCNET_MASTERSERVER__ENABLED=${CNCNET_MASTERSERVER__ENABLED}
+      - CNCNET_MASTERSERVER__PASSWORD=${CNCNET_MASTERSERVER__PASSWORD}
+      - CNCNET_TUNNELV3__PORT=${CNCNET_TUNNELV3__PORT}
+      - CNCNET_TUNNELV2__PORT=${CNCNET_TUNNELV2__PORT}
+      - CNCNET_TUNNELV3__IPLIMIT=${CNCNET_TUNNELV3__IPLIMIT}
+      - CNCNET_TUNNELV2__IPLIMIT=${CNCNET_TUNNELV2__IPLIMIT}
+      - CNCNET_SECURITY__IPBLACKLISTDURATIONHOURS=${CNCNET_SECURITY__IPBLACKLISTDURATIONHOURS}
+      - CNCNET_WEBMONITOR__PORT=${CNCNET_WEBMONITOR__PORT}
+      - CNCNET_LOGGING__MINIMUMLEVEL=${CNCNET_LOGGING__MINIMUMLEVEL}
+
+    ports:
+      - "${CNCNET_TUNNELV3__PORT}:${CNCNET_TUNNELV3__PORT}/udp"
+      - "${CNCNET_TUNNELV2__PORT}:${CNCNET_TUNNELV2__PORT}/udp"
+      - "${CNCNET_TUNNELV2__PORT}:${CNCNET_TUNNELV2__PORT}/tcp"
+      - "8054:8054/udp"
+      - "3478:3478/udp"
+      - "${CNCNET_WEBMONITOR__PORT}:${CNCNET_WEBMONITOR__PORT}/tcp"
+
+    volumes:
+      - ./logs:/app/logs
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${CNCNET_WEBMONITOR__PORT}/json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -257,23 +257,20 @@ Start-Service CnCNetServer
 
 ### Docker
 
-```dockerfile
-FROM mcr.microsoft.com/dotnet/runtime:10.0
-WORKDIR /app
-COPY . .
-EXPOSE 50001/udp 50000/tcp 50000/udp 8054/udp 3478/udp 1337/tcp
-ENTRYPOINT ["./cncnet-server"]
+```bash
+# 1. Copy and edit the environment file
+cp .env.example .env
+nano .env
+
+# 2. Start
+docker compose up -d
+
+# 3. View logs
+docker compose logs -f
 ```
 
-```bash
-docker run -d \
-  -e CNCNET_SERVER__NAME="My Server" \
-  -e CNCNET_MAINTENANCE__PASSWORD="your-password" \
-  -p 50001:50001/udp \
-  -p 50000:50000 \
-  -p 1337:1337 \
-  cncnet-server
-```
+The `.env` file is automatically loaded by docker-compose.
+Logs are persisted in the `./logs` directory on the host.
 
 ---
 
