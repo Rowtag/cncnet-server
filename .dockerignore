@@ -1,0 +1,8 @@
+bin/
+obj/
+logs/
+.git/
+.gitignore
+*.md
+appsettings.local.json
+.env
