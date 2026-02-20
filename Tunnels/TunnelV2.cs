@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using CnCNetServer.Configuration;
 using CnCNetServer.Models;
@@ -19,7 +20,6 @@ namespace CnCNetServer.Tunnels;
 /// HTTP Endpoints:
 /// - GET /request?clients=N  -> Allocates N client slots (2-8), returns JSON array of IDs
 /// - GET /status             -> Returns server status (slots free/in use)
-/// - GET /maintenance/{pw}   -> Toggles maintenance mode
 ///
 /// UDP Protocol Format (V2):
 /// [SenderId: 2 bytes (network order)][ReceiverId: 2 bytes (network order)][Payload: N bytes]
@@ -53,7 +53,7 @@ public sealed class TunnelV2 : IDisposable
     private readonly ConcurrentDictionary<short, TunnelClient> _mappings;
 
     // Request rate limiting per IP
-    private readonly ConcurrentDictionary<int, int> _requestCounter;
+    private readonly ConcurrentDictionary<string, int> _requestCounter;
 
     // Heartbeat timer
     private readonly Timer _heartbeatTimer;
@@ -61,7 +61,7 @@ public sealed class TunnelV2 : IDisposable
     // Thread synchronization
     private readonly Lock _mappingsLock = new();
     private readonly CancellationTokenSource _cts = new();
-    private readonly Random _random = new();
+    // Cryptographically secure random for client ID generation
 
     // State
     private volatile bool _maintenanceMode;
@@ -141,7 +141,7 @@ public sealed class TunnelV2 : IDisposable
         _httpClient = httpClient;
 
         _mappings = new ConcurrentDictionary<short, TunnelClient>();
-        _requestCounter = new ConcurrentDictionary<int, int>();
+        _requestCounter = new ConcurrentDictionary<string, int>();
 
         // Create UDP socket
         _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -263,10 +263,7 @@ public sealed class TunnelV2 : IDisposable
             {
                 await HandleStatusRequestAsync(response);
             }
-            else if (path.StartsWith("/maintenance/", StringComparison.OrdinalIgnoreCase))
-            {
-                HandleMaintenanceRequest(path, response);
-            }
+            // /maintenance/{pw} endpoint removed - use web dashboard instead
             else
             {
                 response.StatusCode = 400; // Bad Request
@@ -320,7 +317,7 @@ public sealed class TunnelV2 : IDisposable
             // Allocate client IDs
             while (allocatedIds.Count < requestedClients)
             {
-                var clientId = (short)_random.Next(short.MinValue, short.MaxValue);
+                var clientId = (short)RandomNumberGenerator.GetInt32(short.MinValue, short.MaxValue);
 
                 if (!_mappings.ContainsKey(clientId))
                 {
@@ -361,28 +358,7 @@ public sealed class TunnelV2 : IDisposable
         await response.OutputStream.WriteAsync(buffer);
     }
 
-    /// <summary>
-    /// Handles a maintenance mode toggle request.
-    /// </summary>
-    private void HandleMaintenanceRequest(string path, HttpListenerResponse response)
-    {
-        if (string.IsNullOrEmpty(_options.Maintenance.Password))
-        {
-            response.StatusCode = 401;
-            return;
-        }
 
-        var parts = path.Split('/');
-        if (parts.Length < 3 || parts[2] != _options.Maintenance.Password)
-        {
-            response.StatusCode = 401;
-            return;
-        }
-
-        _maintenanceMode = true;
-        _logger.Warning("V2 Maintenance mode ENABLED via HTTP");
-        response.StatusCode = 200;
-    }
 
     /// <summary>
     /// Checks if a request from an IP is within rate limits.
@@ -392,8 +368,7 @@ public sealed class TunnelV2 : IDisposable
         if (address == null)
             return false;
 
-        var ipHash = address.GetHashCode();
-        var count = _requestCounter.AddOrUpdate(ipHash, 1, (_, c) => c + 1);
+        var count = _requestCounter.AddOrUpdate(address.ToString(), 1, (_, c) => c + 1);
 
         return count <= _options.TunnelV2.IpLimit;
     }
