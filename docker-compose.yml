@@ -4,48 +4,22 @@ services:
     container_name: cncnet-server
     restart: unless-stopped
 
-    # ── Option A: Config via .env file (see .env.example) ─────────────────────
-    # All settings can be configured in the .env file next to this file.
-    # docker-compose loads .env automatically.
-    environment:
-      - CNCNET_SERVER__NAME=${CNCNET_SERVER__NAME}
-      - CNCNET_SERVER__MAXCLIENTS=${CNCNET_SERVER__MAXCLIENTS}
-      - CNCNET_SERVER__CLIENTTIMEOUT=${CNCNET_SERVER__CLIENTTIMEOUT}
-      - CNCNET_MAINTENANCE__PASSWORD=${CNCNET_MAINTENANCE__PASSWORD}
-      - CNCNET_MASTERSERVER__ENABLED=${CNCNET_MASTERSERVER__ENABLED}
-      - CNCNET_MASTERSERVER__PASSWORD=${CNCNET_MASTERSERVER__PASSWORD}
-      - CNCNET_TUNNELV3__PORT=${CNCNET_TUNNELV3__PORT}
-      - CNCNET_TUNNELV2__PORT=${CNCNET_TUNNELV2__PORT}
-      - CNCNET_TUNNELV3__IPLIMIT=${CNCNET_TUNNELV3__IPLIMIT}
-      - CNCNET_TUNNELV2__IPLIMIT=${CNCNET_TUNNELV2__IPLIMIT}
-      - CNCNET_SECURITY__IPBLACKLISTDURATIONHOURS=${CNCNET_SECURITY__IPBLACKLISTDURATIONHOURS}
-      - CNCNET_WEBMONITOR__PORT=${CNCNET_WEBMONITOR__PORT}
-      - CNCNET_LOGGING__MINIMUMLEVEL=${CNCNET_LOGGING__MINIMUMLEVEL}
-
     volumes:
-      # Persist log files on the host
+      # Local config file (copy appsettings.local.example.json and fill in your values)
+      - ./appsettings.local.json:/app/appsettings.local.json:ro
+      # Persistent log files
       - ./logs:/app/logs
 
-      # ── Option B: Config via JSON file ──────────────────────────────────────
-      # Instead of (or in addition to) the .env file, you can provide a
-      # appsettings.local.json file:
-      #
-      #   cp appsettings.local.example.json appsettings.local.json
-      #   nano appsettings.local.json
-      #
-      # Then uncomment the line below:
-      # - ./appsettings.local.json:/app/appsettings.local.json:ro
-
     ports:
-      - "${CNCNET_TUNNELV3__PORT}:${CNCNET_TUNNELV3__PORT}/udp"
-      - "${CNCNET_TUNNELV2__PORT}:${CNCNET_TUNNELV2__PORT}/udp"
-      - "${CNCNET_TUNNELV2__PORT}:${CNCNET_TUNNELV2__PORT}/tcp"
+      - "50001:50001/udp"
+      - "50000:50000/udp"
+      - "50000:50000/tcp"
       - "8054:8054/udp"
       - "3478:3478/udp"
-      - "${CNCNET_WEBMONITOR__PORT}:${CNCNET_WEBMONITOR__PORT}/tcp"
+      - "1337:1337/tcp"
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${CNCNET_WEBMONITOR__PORT}/json"]
+      test: ["CMD", "curl", "-f", "http://localhost:1337/json"]
       interval: 30s
       timeout: 5s
       retries: 3
