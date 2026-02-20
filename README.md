@@ -1,20 +1,15 @@
-# CnCNet Tunnel Server v4.1
+# CnCNet Tunnel Server
 
 A modern, high-performance UDP relay server for Command & Conquer games on CnCNet.
 
 ## Features
 
-- **.NET 10** – Latest .NET runtime for best performance
-- **Cross-platform** – Windows, Linux, macOS
 - **CnCNet V2 & V3 tunnel protocols** – Full compatibility
 - **STUN server** – P2P NAT traversal support
 - **Web Dashboard** – Real-time monitoring with login protection
 - **DDoS Protection** – Rate limiting, IP blacklists, packet validation
 - **External Blacklists** – Auto-loaded from public security sources (refreshed hourly)
-
-## Requirements
-
-- [.NET Runtime 10](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
+- **Cross-platform** – Windows, Linux, macOS
 
 ## Ports
 
@@ -30,7 +25,7 @@ A modern, high-performance UDP relay server for Command & Conquer games on CnCNe
 
 ## Configuration
 
-All settings are in `appsettings.json`. Edit this file before starting the server.
+All settings live in `appsettings.json`. Edit this file before starting the server.
 
 ```json
 {
@@ -90,7 +85,11 @@ All settings are in `appsettings.json`. Edit this file before starting the serve
 
 ## Installation
 
+Download the latest release from the [Releases page](https://github.com/Rowtag/cncnet-server/releases/latest).
+
 ### Linux (systemd)
+
+**Requirements:** [.NET Runtime 10](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
 
 ```bash
 # Install .NET runtime
@@ -99,8 +98,8 @@ sudo apt-get update && sudo apt-get install -y dotnet-runtime-10.0
 # Create dedicated user
 sudo useradd -m -r cncnet-server
 
-# Extract release archive
-sudo unzip cncnet-server-v4.1.6-linux-x64.zip -d /opt/cncnet-server
+# Extract the release archive (replace filename with the one you downloaded)
+sudo unzip cncnet-server-*-linux-x64.zip -d /opt/cncnet-server
 sudo chown -R cncnet-server:cncnet-server /opt/cncnet-server
 sudo chmod +x /opt/cncnet-server/cncnet-server
 
@@ -131,6 +130,8 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now cncnet-server
+
+# Follow logs
 sudo journalctl -u cncnet-server -f
 ```
 
@@ -149,13 +150,20 @@ sudo ufw allow 1337/tcp
 
 ### Windows
 
+**Requirements:** [.NET Runtime 10](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
+
 ```powershell
-Expand-Archive cncnet-server-v4.1.6-win-x64.zip -DestinationPath C:\cncnet-server
+# Extract the release archive
+Expand-Archive cncnet-server-*-win-x64.zip -DestinationPath C:\cncnet-server
+
+# Edit config
 notepad C:\cncnet-server\appsettings.json
 
+# Install and start as Windows Service
 New-Service -Name CnCNetServer `
   -BinaryPathName '"C:\cncnet-server\cncnet-server.exe"' `
-  -StartupType Automatic -DisplayName "CnCNet Tunnel Server"
+  -StartupType Automatic `
+  -DisplayName "CnCNet Tunnel Server"
 
 Start-Service CnCNetServer
 ```
@@ -165,21 +173,23 @@ Start-Service CnCNetServer
 ### Docker
 
 ```bash
-# 1. Download the config template and edit it
+# 1. Download the config template
 curl -O https://raw.githubusercontent.com/Rowtag/cncnet-server/master/appsettings.json
+
+# 2. Edit the config
 nano appsettings.json
 
-# 2. Download docker-compose.yml
+# 3. Download docker-compose.yml
 curl -O https://raw.githubusercontent.com/Rowtag/cncnet-server/master/docker-compose.yml
 
-# 3. Start
+# 4. Start
 docker compose up -d
 
-# View logs
+# Follow logs
 docker compose logs -f
 ```
 
-The `appsettings.json` is mounted into the container. After changing it:
+After changing `appsettings.json`:
 
 ```bash
 docker compose restart
@@ -189,23 +199,23 @@ docker compose restart
 
 ## Web Dashboard
 
-Available at `http://<server>:1337` (port configurable via `WebMonitor:Port`).
+Available at `http://<server>:1337` (port configurable via `WebMonitor.Port`).
 
-Set a password via `Maintenance:Password` in `appsettings.json` to enable login protection.
+Protect the dashboard by setting a password via `Maintenance.Password` in `appsettings.json`.
 
 **Features:**
 - Tunnel status & connected clients
 - DDoS protection & packet validation toggles
 - Maintenance mode per tunnel
-- IP limit configuration
-- Blocked IP management
+- IP limit & blacklist duration configuration
+- Blocked IP management with manual unblock
 - Real-time log viewer
 
 ---
 
 ## License
 
-GPL-3.0 – See LICENSE file for details.
+GPL-3.0 – See [LICENSE](LICENSE) for details.
 
 ## Links
 
