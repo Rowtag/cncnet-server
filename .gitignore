@@ -207,5 +207,3 @@ FakesAssemblies/
 -e 
 appsettings.local.json
 -e 
-# Docker environment file
-.env
