@@ -100,6 +100,18 @@ public sealed class StatusWebServer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Sets standard security headers on every HTTP response.
+    /// </summary>
+    private static void SetSecurityHeaders(HttpListenerResponse response)
+    {
+        response.AddHeader("X-Frame-Options", "DENY");
+        response.AddHeader("X-Content-Type-Options", "nosniff");
+        response.AddHeader("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'");
+        response.AddHeader("Referrer-Policy", "no-referrer");
+        response.AddHeader("X-XSS-Protection", "1; mode=block");
+    }
+
     private async Task ProcessRequestAsync(HttpListenerContext context)
     {
         var response = context.Response;
@@ -109,6 +121,8 @@ public sealed class StatusWebServer : IDisposable
 
         try
         {
+            SetSecurityHeaders(response);
+
             var requiresAuth = !string.IsNullOrEmpty(_options.Maintenance.Password);
 
             // Public routes (no auth needed)
@@ -254,7 +268,10 @@ public sealed class StatusWebServer : IDisposable
         var formData = HttpUtility.ParseQueryString(body);
         var password = formData["password"];
 
-        if (password == _options.Maintenance.Password)
+        if (!string.IsNullOrEmpty(password) &&
+            CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(password),
+                Encoding.UTF8.GetBytes(_options.Maintenance.Password)))
         {
             // Generate cryptographically secure session ID and CSRF token
             var sessionId = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
