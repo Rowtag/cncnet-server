@@ -171,21 +171,21 @@ public sealed class StatusWebServer : IDisposable
             // Validate CSRF token on all POST requests
             if (!ValidateCsrf(request))
             {
-                _logger.Warning("[WEB] CSRF validation failed from {IP} on {Path}", clientIp, path);
+                _logger.Warning("[WEB] CSRF validation failed from {IP} on {Path}", IpAnonymizer.Anonymize(clientIp), path);
                 response.StatusCode = 403;
                 return;
             }
 
             if (path.StartsWith("/maintenance/", StringComparison.OrdinalIgnoreCase))
-                HandleMaintenanceRequest(path, response);
+                HandleMaintenanceRequest(path, response, clientIp);
             else if (path.StartsWith("/toggle/", StringComparison.OrdinalIgnoreCase))
-                HandleToggleRequest(path, response);
+                HandleToggleRequest(path, response, clientIp);
             else if (path.StartsWith("/setlimit/", StringComparison.OrdinalIgnoreCase))
-                HandleSetLimitRequest(path, response);
+                HandleSetLimitRequest(path, response, clientIp);
             else if (path.StartsWith("/setblacklistduration/", StringComparison.OrdinalIgnoreCase))
-                HandleSetBlacklistDurationRequest(path, response);
+                HandleSetBlacklistDurationRequest(path, response, clientIp);
             else if (path.StartsWith("/unblock/", StringComparison.OrdinalIgnoreCase))
-                HandleUnblockRequest(path, response);
+                HandleUnblockRequest(path, response, clientIp);
             else
                 await SendHtmlResponseAsync(request, response, requiresAuth);
         }
@@ -287,7 +287,7 @@ public sealed class StatusWebServer : IDisposable
                 HttpOnly = true
             });
 
-            _logger.Information("[WEB] Successful login from {IP}", clientIp);
+            _logger.Information("[WEB] Successful login from {IP}", IpAnonymizer.Anonymize(clientIp));
             response.Redirect("/");
         }
         else
@@ -300,13 +300,13 @@ public sealed class StatusWebServer : IDisposable
             if (currentAttempts.Attempts >= MaxLoginAttempts)
             {
                 _loginAttempts[clientIp] = (currentAttempts.Attempts, DateTime.UtcNow.Add(LockoutDuration));
-                _logger.Warning("[WEB] IP {IP} locked out after {Attempts} failed login attempts", clientIp, currentAttempts.Attempts);
+                _logger.Warning("[WEB] IP {IP} locked out after {Attempts} failed login attempts", IpAnonymizer.Anonymize(clientIp), currentAttempts.Attempts);
                 await SendLoginPageAsync(response, $"Too many failed attempts. Locked out for {(int)LockoutDuration.TotalMinutes} minutes.");
             }
             else
             {
                 var remaining = MaxLoginAttempts - currentAttempts.Attempts;
-                _logger.Warning("[WEB] Failed login from {IP} ({Attempts}/{Max})", clientIp, currentAttempts.Attempts, MaxLoginAttempts);
+                _logger.Warning("[WEB] Failed login from {IP} ({Attempts}/{Max})", IpAnonymizer.Anonymize(clientIp), currentAttempts.Attempts, MaxLoginAttempts);
                 await SendLoginPageAsync(response, $"Invalid password. {remaining} attempt(s) remaining.");
             }
         }
@@ -387,7 +387,7 @@ public sealed class StatusWebServer : IDisposable
 
     #region Request Handlers (all POST + CSRF validated)
 
-    private void HandleMaintenanceRequest(string path, HttpListenerResponse response)
+    private void HandleMaintenanceRequest(string path, HttpListenerResponse response, string clientIp)
     {
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2) { response.StatusCode = 400; return; }
@@ -396,11 +396,11 @@ public sealed class StatusWebServer : IDisposable
         {
             case "v3":
                 _tunnelV3?.ToggleMaintenanceMode();
-                _logger.Warning("[WEB] V3 Maintenance mode {Status}", _tunnelV3?.IsMaintenanceMode == true ? "ENABLED" : "DISABLED");
+                _logger.Warning("[AUDIT] {AdminIp} toggled V3 Maintenance: {Status}", IpAnonymizer.Anonymize(clientIp), _tunnelV3?.IsMaintenanceMode == true ? "ENABLED" : "DISABLED");
                 break;
             case "v2":
                 _tunnelV2?.ToggleMaintenanceMode();
-                _logger.Warning("[WEB] V2 Maintenance mode {Status}", _tunnelV2?.IsMaintenanceMode == true ? "ENABLED" : "DISABLED");
+                _logger.Warning("[AUDIT] {AdminIp} toggled V2 Maintenance: {Status}", IpAnonymizer.Anonymize(clientIp), _tunnelV2?.IsMaintenanceMode == true ? "ENABLED" : "DISABLED");
                 break;
             default:
                 response.StatusCode = 400; return;
@@ -408,7 +408,7 @@ public sealed class StatusWebServer : IDisposable
         response.StatusCode = 200;
     }
 
-    private void HandleToggleRequest(string path, HttpListenerResponse response)
+    private void HandleToggleRequest(string path, HttpListenerResponse response, string clientIp)
     {
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2) { response.StatusCode = 400; return; }
@@ -416,16 +416,19 @@ public sealed class StatusWebServer : IDisposable
         switch (parts[1].ToLowerInvariant())
         {
             case "v3validation":
+                var prevV3Validation = TunnelV3PacketValidation.Enabled;
                 TunnelV3PacketValidation.Enabled = !TunnelV3PacketValidation.Enabled;
-                _logger.Warning("[WEB] V3 Packet Validation {Status}", TunnelV3PacketValidation.Enabled ? "ENABLED" : "DISABLED");
+                _logger.Warning("[AUDIT] {AdminIp} toggled V3 Packet Validation: {Old} → {New}", IpAnonymizer.Anonymize(clientIp), prevV3Validation ? "ON" : "OFF", TunnelV3PacketValidation.Enabled ? "ON" : "OFF");
                 break;
             case "v3ddos":
+                var prevV3DDoS = _options.TunnelV3.DDoSProtectionEnabled;
                 _options.TunnelV3.DDoSProtectionEnabled = !_options.TunnelV3.DDoSProtectionEnabled;
-                _logger.Warning("[WEB] V3 DDoS Protection {Status}", _options.TunnelV3.DDoSProtectionEnabled ? "ENABLED" : "DISABLED");
+                _logger.Warning("[AUDIT] {AdminIp} toggled V3 DDoS Protection: {Old} → {New}", IpAnonymizer.Anonymize(clientIp), prevV3DDoS ? "ON" : "OFF", _options.TunnelV3.DDoSProtectionEnabled ? "ON" : "OFF");
                 break;
             case "v2ddos":
+                var prevV2DDoS = _options.TunnelV2.DDoSProtectionEnabled;
                 _options.TunnelV2.DDoSProtectionEnabled = !_options.TunnelV2.DDoSProtectionEnabled;
-                _logger.Warning("[WEB] V2 DDoS Protection {Status}", _options.TunnelV2.DDoSProtectionEnabled ? "ENABLED" : "DISABLED");
+                _logger.Warning("[AUDIT] {AdminIp} toggled V2 DDoS Protection: {Old} → {New}", IpAnonymizer.Anonymize(clientIp), prevV2DDoS ? "ON" : "OFF", _options.TunnelV2.DDoSProtectionEnabled ? "ON" : "OFF");
                 break;
             default:
                 response.StatusCode = 400; return;
@@ -433,7 +436,7 @@ public sealed class StatusWebServer : IDisposable
         response.StatusCode = 200;
     }
 
-    private void HandleSetLimitRequest(string path, HttpListenerResponse response)
+    private void HandleSetLimitRequest(string path, HttpListenerResponse response, string clientIp)
     {
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 3 || !int.TryParse(parts[2], out var value) || value < 1 || value > 40)
@@ -443,32 +446,36 @@ public sealed class StatusWebServer : IDisposable
 
         switch (parts[1].ToLowerInvariant())
         {
-            case "v3": _options.TunnelV3.IpLimit = value; _logger.Warning("[WEB] V3 IP Limit → {Value}", value); break;
-            case "v2": _options.TunnelV2.IpLimit = value; _logger.Warning("[WEB] V2 IP Limit → {Value}", value); break;
+            case "v3": { var prev = _options.TunnelV3.IpLimit; _options.TunnelV3.IpLimit = value; _logger.Warning("[AUDIT] {AdminIp} changed V3 IP Limit: {Old} → {New}", IpAnonymizer.Anonymize(clientIp), prev, value); break; }
+            case "v2": { var prev = _options.TunnelV2.IpLimit; _options.TunnelV2.IpLimit = value; _logger.Warning("[AUDIT] {AdminIp} changed V2 IP Limit: {Old} → {New}", IpAnonymizer.Anonymize(clientIp), prev, value); break; }
             default: response.StatusCode = 400; return;
         }
         response.StatusCode = 200;
     }
 
-    private void HandleSetBlacklistDurationRequest(string path, HttpListenerResponse response)
+    private void HandleSetBlacklistDurationRequest(string path, HttpListenerResponse response, string clientIp)
     {
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2 || !int.TryParse(parts[1], out var hours) || hours < 1 || hours > 168)
         {
             response.StatusCode = 400; return;
         }
+        var prevDuration = _options.Security.IpBlacklistDurationHours;
         _options.Security.IpBlacklistDurationHours = hours;
-        _logger.Warning("[WEB] Blacklist duration → {Hours} hours", hours);
+        _logger.Warning("[AUDIT] {AdminIp} changed Blacklist Duration: {Old}h → {New}h", IpAnonymizer.Anonymize(clientIp), prevDuration, hours);
         response.StatusCode = 200;
     }
 
-    private void HandleUnblockRequest(string path, HttpListenerResponse response)
+    private void HandleUnblockRequest(string path, HttpListenerResponse response, string clientIp)
     {
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2) { response.StatusCode = 400; return; }
 
         var ip = HttpUtility.UrlDecode(parts[1]);
-        response.StatusCode = _securityManager.RemoveFromBlacklist(ip) ? 200 : 404;
+        var removed = _securityManager.RemoveFromBlacklist(ip);
+        if (removed)
+            _logger.Warning("[AUDIT] {AdminIp} unblocked IP {IP}", IpAnonymizer.Anonymize(clientIp), IpAnonymizer.Anonymize(ip));
+        response.StatusCode = removed ? 200 : 404;
     }
 
     #endregion
