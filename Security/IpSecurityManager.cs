@@ -129,7 +129,7 @@ public sealed class IpSecurityManager : IDisposable
     {
         var expiry = DateTime.UtcNow.AddHours(_options.IpBlacklistDurationHours);
         _localBlacklist[address.ToString()] = expiry;
-        _logger.Warning("IP {IP} added to local blacklist until {Expiry}", address, expiry);
+        _logger.Warning("IP {IP} added to local blacklist until {Expiry}", IpAnonymizer.Anonymize(address), expiry);
     }
 
     /// <summary>
@@ -159,7 +159,7 @@ public sealed class IpSecurityManager : IDisposable
 
         var removed = _localBlacklist.TryRemove(ipAddress, out _);
         if (removed)
-            _logger.Warning("IP {IP} manually removed from local blacklist", ipAddress);
+            _logger.Warning("IP {IP} manually removed from local blacklist", IpAnonymizer.Anonymize(ipAddress));
         return removed;
     }
 
