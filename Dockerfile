@@ -1,5 +1,5 @@
 # Build stage
-FROM mcr.microsoft.com/dotnet/sdk:10.0-preview AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 COPY CnCNetServer.csproj .
@@ -9,7 +9,7 @@ COPY . .
 RUN dotnet publish CnCNetServer.csproj -c Release -r linux-x64 --self-contained true -o /app/publish
 
 # Runtime stage
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-preview AS runtime
+FROM mcr.microsoft.com/dotnet/runtime-deps:10.0 AS runtime
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*

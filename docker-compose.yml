@@ -4,6 +4,13 @@ services:
     container_name: cncnet-server
     restart: unless-stopped
 
+    # Secrets are provided via the environment (e.g. a local .env file that is
+    # NOT committed to git). They override the empty defaults in appsettings.json.
+    # Nested config keys use double underscores: Section__Key
+    environment:
+      - CNCNET_MAINTENANCE__PASSWORD=${CNCNET_MAINTENANCE__PASSWORD:-}
+      - CNCNET_MASTERSERVER__PASSWORD=${CNCNET_MASTERSERVER__PASSWORD:-}
+
     volumes:
       # Mount your appsettings.json with your configuration
       - ./appsettings.json:/app/appsettings.json:ro
