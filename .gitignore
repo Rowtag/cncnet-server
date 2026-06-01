@@ -209,3 +209,15 @@ appsettings.local.json
 # Local secrets / environment overrides (never commit real passwords)
 .env
 .env.local
+
+# secret hygiene
+keystore.env
+*.env
+!*.env.example
+!*.env.sample
+secrets/
+backups/
+*.tar.gz
+*.db
+*.sqlite
+*.sqlite3
