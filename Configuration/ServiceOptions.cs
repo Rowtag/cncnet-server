@@ -62,6 +62,65 @@ public sealed class TunnelV3Options
     /// Whether DDoS protection is enabled for V3 tunnel.
     /// </summary>
     public bool DDoSProtectionEnabled { get; set; } = true;
+
+    /// <summary>
+    /// How many copies of each relayed packet to send. 1 means send once, which is normal
+    /// behaviour; 2 or more sends duplicates, trading upstream bandwidth for resilience to packet
+    /// loss.
+    /// </summary>
+    public int RelayPacketCopies { get; set; } = 1;
+
+    /// <summary>
+    /// Settings for running this server in the matchmaking role.
+    /// </summary>
+    public MatchmakingOptions Matchmaking { get; set; } = new();
+}
+
+/// <summary>
+/// Configuration for the matchmaking role of the V3 tunnel.
+/// </summary>
+/// <remarks>
+/// A matchmaking server is where two clients meet to swap tunnel lists and agree which relay
+/// tunnels to test, before either registers on a relay. That exchange is a handful of small packets
+/// lasting seconds, so one matchmaking server carries far more clients than a relay - which is the
+/// point: it lets every pair pick good tunnels without first registering on every tunnel.
+///
+/// It relays only that exchange and drops game traffic. It announces itself to the master list as
+/// version 4, so clients that predate matchmaking ignore it and cannot pick it to host a game.
+/// </remarks>
+public sealed class MatchmakingOptions
+{
+    /// <summary>
+    /// Whether this server runs as a matchmaking server instead of an ordinary V3 relay.
+    /// </summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Maximum concurrent clients in the matchmaking role, replacing <see cref="ServerOptions.MaxClients"/>.
+    /// Sessions here are short and hold no game state, so this is far higher than a relay's limit.
+    /// </summary>
+    public int MaxClients { get; set; } = 2000;
+
+    /// <summary>
+    /// Timeout in seconds after which an inactive matchmaking client is dropped, replacing
+    /// <see cref="ServerOptions.ClientTimeout"/>. Clients are here only for the few seconds an
+    /// exchange takes, so a relay's timeout would tie up most of the capacity on finished sessions.
+    /// </summary>
+    public int ClientTimeout { get; set; } = 25;
+
+    /// <summary>
+    /// Maximum concurrent sessions per IP in the matchmaking role, replacing
+    /// <see cref="TunnelV3Options.IpLimit"/>. Higher than a relay's, because every player passes
+    /// through matchmaking for every lobby they join: a shared connection, or one player moving
+    /// between lobbies, legitimately produces far more sessions here than on any one relay.
+    /// </summary>
+    public int IpLimit { get; set; } = 32;
+
+    /// <summary>
+    /// Largest packet, in bytes, that will be relayed between matchmaking clients. Tunnel list
+    /// exchanges are under a kilobyte; anything larger is not matchmaking traffic.
+    /// </summary>
+    public int MaxRelayPacketBytes { get; set; } = 1200;
 }
 
 /// <summary>

@@ -488,7 +488,7 @@ public sealed class TunnelV2 : IDisposable
             // First packet from this sender - assign endpoint
             if (sender.RemoteEndPoint == null)
             {
-                sender.RemoteEndPoint = new IPEndPoint(remoteEndPoint.Address, remoteEndPoint.Port);
+                sender.SetRemote(new IPEndPoint(remoteEndPoint.Address, remoteEndPoint.Port));
             }
             // Endpoint mismatch - reject (V2 doesn't allow endpoint changes)
             else if (!remoteEndPoint.Equals(sender.RemoteEndPoint))

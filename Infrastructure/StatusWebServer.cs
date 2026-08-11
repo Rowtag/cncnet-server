@@ -182,6 +182,8 @@ public sealed class StatusWebServer : IDisposable
                 HandleToggleRequest(path, response, clientIp);
             else if (path.StartsWith("/setlimit/", StringComparison.OrdinalIgnoreCase))
                 HandleSetLimitRequest(path, response, clientIp);
+            else if (path.StartsWith("/setrelaycopies/", StringComparison.OrdinalIgnoreCase))
+                HandleSetRelayCopiesRequest(path, response, clientIp);
             else if (path.StartsWith("/setblacklistduration/", StringComparison.OrdinalIgnoreCase))
                 HandleSetBlacklistDurationRequest(path, response, clientIp);
             else if (path.StartsWith("/unblock/", StringComparison.OrdinalIgnoreCase))
@@ -453,6 +455,31 @@ public sealed class StatusWebServer : IDisposable
         response.StatusCode = 200;
     }
 
+    private void HandleSetRelayCopiesRequest(string path, HttpListenerResponse response, string clientIp)
+    {
+        if (_tunnelV3 == null)
+        {
+            response.StatusCode = 404;
+            return;
+        }
+
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || !int.TryParse(parts[1], out var copies) || copies < 1 || copies > 3)
+        {
+            response.StatusCode = 400;
+            return;
+        }
+
+        var previous = _tunnelV3.RelayPacketCopies;
+        var current = _tunnelV3.SetRelayPacketCopies(copies);
+        _logger.Warning(
+            "[AUDIT] {AdminIp} changed V3 Packet Copies: {Old} -> {New}",
+            IpAnonymizer.Anonymize(clientIp),
+            previous,
+            current);
+        response.StatusCode = 200;
+    }
+
     private void HandleSetBlacklistDurationRequest(string path, HttpListenerResponse response, string clientIp)
     {
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -518,13 +545,18 @@ public sealed class StatusWebServer : IDisposable
             {
                 Port = _options.TunnelV3.Port, Enabled = _options.TunnelV3.Enabled,
                 ConnectedClients = _tunnelV3.ConnectedClients, ReservedSlots = 0,
-                UniqueIps = _tunnelV3.UniqueIpCount, Maintenance = _tunnelV3.IsMaintenanceMode
+                UniqueIps = _tunnelV3.UniqueIpCount, Maintenance = _tunnelV3.IsMaintenanceMode,
+                // In the matchmaking role V3 has its own, much higher cap, so the panel must not
+                // report progress against Server.MaxClients.
+                MaxClients = _tunnelV3.MaxClients, Matchmaking = _tunnelV3.IsMatchmakingServer,
+                RelayPacketCopies = _tunnelV3.RelayPacketCopies
             } : null,
             TunnelV2 = _tunnelV2 != null ? new TunnelInfo
             {
                 Port = _options.TunnelV2.Port, Enabled = _options.TunnelV2.Enabled,
                 ConnectedClients = _tunnelV2.ConnectedClients, ReservedSlots = _tunnelV2.ReservedSlots,
-                UniqueIps = _tunnelV2.UniqueIpCount, Maintenance = _tunnelV2.IsMaintenanceMode
+                UniqueIps = _tunnelV2.UniqueIpCount, Maintenance = _tunnelV2.IsMaintenanceMode,
+                MaxClients = _options.Server.MaxClients
             } : null,
             Security = new SecurityInfo
             {
@@ -644,14 +676,15 @@ public sealed class StatusWebServer : IDisposable
                 ? ("Maintenance", "&#128295;", "status-maint")
                 : status.TunnelV3.Enabled ? ("Online", "&#9989;", "status-ok") : ("Offline", "&#10060;", "status-disabled");
             var v3MaintClass = status.TunnelV3.Maintenance ? "active" : "inactive";
+            var v3Role = status.TunnelV3.Matchmaking ? " &mdash; Matchmaking" : string.Empty;
 
             sb.AppendLine($"""
                     <div class="card">
-                        <h2>&#128225; Tunnel V3 (Port {status.TunnelV3.Port})</h2>
+                        <h2>&#128225; Tunnel V3 (Port {status.TunnelV3.Port}){v3Role}</h2>
                         <div class="stat"><span class="stat-label">Status</span>
                             <span class="stat-value {v3Class}">{v3Icon} {v3Status}</span></div>
                         <div class="stat"><span class="stat-label">Connected Clients</span>
-                            <span class="stat-value">{status.TunnelV3.ConnectedClients} / {status.Server.MaxClients}</span></div>
+                            <span class="stat-value">{status.TunnelV3.ConnectedClients} / {status.TunnelV3.MaxClients}</span></div>
                         <div class="stat"><span class="stat-label">Unique IPs</span>
                             <span class="stat-value">{status.TunnelV3.UniqueIps}</span></div>
                         <div class="stat"><span class="stat-label">Maintenance Mode</span>
@@ -674,7 +707,7 @@ public sealed class StatusWebServer : IDisposable
                         <div class="stat"><span class="stat-label">Status</span>
                             <span class="stat-value {v2Class}">{v2Icon} {v2Status}</span></div>
                         <div class="stat"><span class="stat-label">Reserved Slots</span>
-                            <span class="stat-value">{status.TunnelV2.ReservedSlots} / {status.Server.MaxClients}</span></div>
+                            <span class="stat-value">{status.TunnelV2.ReservedSlots} / {status.TunnelV2.MaxClients}</span></div>
                         <div class="stat"><span class="stat-label">Unique IPs</span>
                             <span class="stat-value">{status.TunnelV2.UniqueIps}</span></div>
                         <div class="stat"><span class="stat-label">Maintenance Mode</span>
@@ -710,6 +743,7 @@ public sealed class StatusWebServer : IDisposable
             """);
 
         // Configuration Card
+        var relayPacketCopies = status.TunnelV3?.RelayPacketCopies ?? _options.TunnelV3.RelayPacketCopies;
         sb.AppendLine($"""
                 <div class="card">
                     <h2>&#9881; Configuration</h2>
@@ -718,6 +752,9 @@ public sealed class StatusWebServer : IDisposable
                     <div class="stat"><span class="stat-label">IP Limit V3 (max 40)</span>
                         <input type="number" class="limit-input" value="{_options.TunnelV3.IpLimit}" min="1" max="40"
                                onkeydown="if(event.key==='Enter')postAction('/setlimit/v3/'+this.value)"></div>
+                    <div class="stat"><span class="stat-label">V3 Packet Copies (1-3)</span>
+                        <input type="number" class="limit-input" value="{relayPacketCopies}" min="1" max="3"
+                               onkeydown="if(event.key==='Enter')postAction('/setrelaycopies/'+this.value)"></div>
                     <div class="stat"><span class="stat-label">IP Limit V2 (max 40)</span>
                         <input type="number" class="limit-input" value="{_options.TunnelV2.IpLimit}" min="1" max="40"
                                onkeydown="if(event.key==='Enter')postAction('/setlimit/v2/'+this.value)"></div>
@@ -849,7 +886,17 @@ public sealed class TunnelInfo
     public int ConnectedClients { get; init; }
     public int ReservedSlots { get; init; }
     public int UniqueIps { get; init; }
+
+    /// <summary>
+    /// The client limit for this tunnel specifically. Not always <see cref="ServerInfo.MaxClients"/>:
+    /// a V3 tunnel in the matchmaking role carries its own, much higher limit.
+    /// </summary>
+    public int MaxClients { get; init; }
+
+    /// <summary>Whether this tunnel is running in the matchmaking role.</summary>
+    public bool Matchmaking { get; init; }
     public bool Maintenance { get; init; }
+    public int? RelayPacketCopies { get; init; }
 }
 
 public sealed class SecurityInfo

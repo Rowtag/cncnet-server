@@ -32,6 +32,11 @@ public static class Program
         options.Server.ClientTimeout = options.Server.ClientTimeout < 10 ? 60 : options.Server.ClientTimeout;
         options.TunnelV3.Port = options.TunnelV3.Port <= 1024 ? 50001 : options.TunnelV3.Port;
         options.TunnelV3.IpLimit = Math.Clamp(options.TunnelV3.IpLimit, 1, 40);
+        options.TunnelV3.RelayPacketCopies = Math.Clamp(options.TunnelV3.RelayPacketCopies, 1, 3);
+        options.TunnelV3.Matchmaking.MaxClients = Math.Clamp(options.TunnelV3.Matchmaking.MaxClients, 2, 20000);
+        options.TunnelV3.Matchmaking.ClientTimeout = Math.Clamp(options.TunnelV3.Matchmaking.ClientTimeout, 10, 300);
+        options.TunnelV3.Matchmaking.IpLimit = Math.Clamp(options.TunnelV3.Matchmaking.IpLimit, 1, 512);
+        options.TunnelV3.Matchmaking.MaxRelayPacketBytes = Math.Clamp(options.TunnelV3.Matchmaking.MaxRelayPacketBytes, 64, 2048);
         options.TunnelV2.Port = options.TunnelV2.Port <= 1024 ? 50000 : options.TunnelV2.Port;
         options.TunnelV2.IpLimit = Math.Clamp(options.TunnelV2.IpLimit, 1, 40);
         options.WebMonitor.Port = options.WebMonitor.Port < 1 ? 1337 : options.WebMonitor.Port;

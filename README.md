@@ -10,8 +10,9 @@ A high-performance UDP relay server for Command & Conquer games on CnCNet, suppo
 2. [Docker](#docker)
 3. [Linux (systemd)](#linux-systemd)
 4. [Windows](#windows)
-5. [Configuration Reference](#configuration-reference)
-6. [Web Dashboard](#web-dashboard)
+5. [Matchmaking Server](#matchmaking-server)
+6. [Configuration Reference](#configuration-reference)
+7. [Web Dashboard](#web-dashboard)
 
 ---
 
@@ -19,13 +20,15 @@ A high-performance UDP relay server for Command & Conquer games on CnCNet, suppo
 
 Open these on your firewall before starting the server.
 
-| Port  | Protocol | Purpose           |
-|-------|----------|-------------------|
-| 50001 | UDP      | V3 Tunnel         |
-| 50000 | TCP+UDP  | V2 Tunnel         |
-| 8054  | UDP      | STUN Server       |
-| 3478  | UDP      | STUN Server       |
-| 1337  | TCP      | Web Dashboard     |
+| Port  | Protocol | Purpose                                  |
+|-------|----------|------------------------------------------|
+| 50001 | UDP      | V3 Tunnel                                |
+| 50000 | TCP+UDP  | V2 Tunnel                                |
+| 8054  | UDP      | STUN Server                              |
+| 3478  | UDP      | STUN Server                              |
+| 1337  | TCP      | Web Dashboard                            |
+| 50002 | UDP      | V3 Tunnel — matchmaking ([see below](#matchmaking-server)) |
+| 1338  | TCP      | Web Dashboard — matchmaking              |
 
 ---
 
@@ -222,6 +225,79 @@ New-NetFirewallRule -DisplayName "CnCNet UDP" -Direction Inbound -Action Allow `
 
 ---
 
+## Matchmaking Server
+
+A matchmaking server is where two clients meet to swap tunnel lists and agree which relay tunnels
+to test, before either registers on a relay. That exchange is a few small packets lasting seconds,
+so one matchmaking server holds far more clients than a relay — which is the point: it stops every
+client having to register on every tunnel just to find a good one.
+
+It **does not carry game traffic**. It relays only the negotiation exchange and drops everything
+else. It announces itself to the master list as **version 4**, so clients released before
+matchmaking existed ignore it entirely and can never pick it to host a game.
+
+Matchmaking is a mode of the V3 tunnel, and a process has one V3 listener — so a server that does
+both roles runs the binary **twice**, from two directories, with two configs.
+
+### Bing
+
+Copy your existing install to a second directory:
+
+```bash
+cp -r /opt/cncnet-server /opt/cncnet-server-matchmaking
+```
+
+### Bang
+
+Create `/opt/cncnet-server-matchmaking/appsettings.local.json`:
+
+```json
+{
+  "Server":       { "Name": "Your Server Name (Matchmaking)" },
+  "TunnelV3":     { "Enabled": true, "Port": 50002,
+                    "Matchmaking": { "Enabled": true, "MaxClients": 2000, "ClientTimeout": 25, "IpLimit": 32 } },
+  "TunnelV2":     { "Enabled": false },
+  "PeerToPeer":   { "Enabled": false },
+  "MasterServer": { "Enabled": true },
+  "WebMonitor":   { "Enabled": true, "Port": 1338 },
+  "Logging":      { "LogDirectory": "logs-matchmaking" },
+  "Maintenance":  { "Password": "your-dashboard-password" }
+}
+```
+
+Four of those exist to avoid colliding with the first instance, and skipping any will bite you:
+
+| Setting | Why |
+|---|---|
+| `PeerToPeer: false` | The first instance already holds STUN 8054/3478; binding them again kills startup. |
+| `WebMonitor.Port: 1338` | Same, for the dashboard on 1337. |
+| `Logging.LogDirectory` | Two processes rolling the same log files fight over locks — and it fails quietly. |
+| `TunnelV2: false` | No point running a second V2. |
+
+### Boom
+
+```bash
+sed 's/cncnet-server/cncnet-server-matchmaking/g' /etc/systemd/system/cncnet-server.service \
+  > /etc/systemd/system/cncnet-server-matchmaking.service
+systemctl daemon-reload
+systemctl enable --now cncnet-server-matchmaking
+```
+
+Open UDP 50002 (and TCP 1338 if you want the dashboard), then confirm it came up in the right role:
+
+```bash
+journalctl -u cncnet-server-matchmaking -n 20 | grep "V3 Tunnel started"
+# V3 Tunnel started on UDP port 50002 in matchmaking mode (max 2000 clients, 25s timeout, 32 per IP)
+```
+
+Within a minute it should appear in <https://cncnet.org/master-list> with a trailing version field
+of `4`. If it doesn't, check the log for `heartbeat failed`.
+
+> **Only a handful of servers should run matchmaking.** Every client contacts *all* of them on
+> every lobby join, so the set is meant to stay small and stable.
+
+---
+
 ## Configuration Reference
 
 All settings are read from `appsettings.json` in the working directory.
@@ -295,10 +371,30 @@ All settings are read from `appsettings.json` in the working directory.
 | `Server.MaxClients` | Maximum simultaneous tunnel clients |
 | `Server.ClientTimeout` | Seconds before an idle client is dropped |
 | `TunnelV3.IpLimit` | Max connections per IP on V3 (1–40) |
+| `TunnelV3.RelayPacketCopies` | Copies sent of each relayed packet (1–3). `1` is normal. Above 1 trades upstream bandwidth for loss resilience, and delivers duplicate datagrams to clients — see the note below |
+| `TunnelV3.Matchmaking.Enabled` | Run this V3 listener as a [matchmaking server](#matchmaking-server) instead of a game relay |
+| `TunnelV3.Matchmaking.MaxClients` | Client limit in matchmaking mode, replacing `Server.MaxClients` |
+| `TunnelV3.Matchmaking.ClientTimeout` | Idle timeout in matchmaking mode, replacing `Server.ClientTimeout` |
+| `TunnelV3.Matchmaking.IpLimit` | Per-IP limit in matchmaking mode, replacing `TunnelV3.IpLimit` |
+| `TunnelV3.Matchmaking.MaxRelayPacketBytes` | Largest packet a matchmaking server will relay |
 | `TunnelV2.IpLimit` | Max connections per IP on V2 (1–40) |
 | `MasterServer.Password` | Password to register on the public master server |
 | `Maintenance.Password` | Password to access the web dashboard |
 | `Security.IpBlacklistDurationHours` | How long an auto-banned IP stays blocked |
+
+### A note on packet duplication
+
+`RelayPacketCopies` above `1` is a blunt instrument, and worth understanding before you reach for it:
+
+- It only protects the **server-to-receiver** leg. A packet lost on its way *to* this server is gone
+  before duplication happens.
+- Copies go out back to back, so it survives a random single drop but not a burst — and congestion
+  loses consecutive packets, which is exactly the case it misses.
+- It multiplies outbound game bandwidth by that factor, and clients receive duplicate datagrams.
+  Client negotiation traffic tolerates duplicates by design; confirm the game itself does before
+  enabling it in anger.
+
+It can also be changed live from the dashboard without restarting.
 
 ---
 
