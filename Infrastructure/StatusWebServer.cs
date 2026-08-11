@@ -35,6 +35,7 @@ public sealed class StatusWebServer : IDisposable
     private readonly TunnelV3? _tunnelV3;
     private readonly TunnelV2? _tunnelV2;
     private readonly IpSecurityManager _securityManager;
+    private readonly GeoResolver _geoResolver;
 
     // Brute-force protection: IP -> (failedAttempts, lockoutUntil)
     private readonly ConcurrentDictionary<string, (int Attempts, DateTime LockoutUntil)> _loginAttempts = new();
@@ -70,6 +71,8 @@ public sealed class StatusWebServer : IDisposable
         _tunnelV2 = tunnelV2;
         _logger = logger.ForContext<StatusWebServer>();
         _startTime = DateTime.UtcNow;
+        _geoResolver = new GeoResolver(
+            Environment.GetEnvironmentVariable("GEO_DB_PATH") ?? "/app/dbip-country-lite.mmdb");
 
         _listener = new HttpListener();
         _listener.IgnoreWriteExceptions = true;
@@ -518,13 +521,15 @@ public sealed class StatusWebServer : IDisposable
             {
                 Port = _options.TunnelV3.Port, Enabled = _options.TunnelV3.Enabled,
                 ConnectedClients = _tunnelV3.ConnectedClients, ReservedSlots = 0,
-                UniqueIps = _tunnelV3.UniqueIpCount, Maintenance = _tunnelV3.IsMaintenanceMode
+                UniqueIps = _tunnelV3.UniqueIpCount, Maintenance = _tunnelV3.IsMaintenanceMode,
+                Countries = _tunnelV3.GetCountryCounts(_geoResolver)
             } : null,
             TunnelV2 = _tunnelV2 != null ? new TunnelInfo
             {
                 Port = _options.TunnelV2.Port, Enabled = _options.TunnelV2.Enabled,
                 ConnectedClients = _tunnelV2.ConnectedClients, ReservedSlots = _tunnelV2.ReservedSlots,
-                UniqueIps = _tunnelV2.UniqueIpCount, Maintenance = _tunnelV2.IsMaintenanceMode
+                UniqueIps = _tunnelV2.UniqueIpCount, Maintenance = _tunnelV2.IsMaintenanceMode,
+                Countries = _tunnelV2.GetCountryCounts(_geoResolver)
             } : null,
             Security = new SecurityInfo
             {
@@ -850,6 +855,7 @@ public sealed class TunnelInfo
     public int ReservedSlots { get; init; }
     public int UniqueIps { get; init; }
     public bool Maintenance { get; init; }
+    public Dictionary<string, int>? Countries { get; init; }
 }
 
 public sealed class SecurityInfo

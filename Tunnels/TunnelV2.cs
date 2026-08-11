@@ -129,6 +129,38 @@ public sealed class TunnelV2 : IDisposable
         }
     }
 
+    /// <summary>
+    /// Gets connected unique IPs grouped by ISO country code.
+    /// Runs only on the status poll over the client set already held; the raw
+    /// IP is used only for the look-up and never stored or returned.
+    /// </summary>
+    public Dictionary<string, int> GetCountryCounts(GeoResolver geo)
+    {
+        var counts = new Dictionary<string, int>();
+        if (geo is null || !geo.Available)
+        {
+            return counts;
+        }
+
+        List<IPAddress> addresses;
+        lock (_mappingsLock)
+        {
+            addresses = _mappings.Values
+                .Where(c => c.RemoteEndPoint != null)
+                .Select(c => c.RemoteEndPoint!.Address)
+                .Distinct()
+                .ToList();
+        }
+
+        foreach (var addr in addresses)
+        {
+            var cc = geo.Resolve(addr);
+            counts[cc] = counts.TryGetValue(cc, out var n) ? n + 1 : 1;
+        }
+
+        return counts;
+    }
+
     public TunnelV2(
         ServiceOptions options,
         IpSecurityManager securityManager,

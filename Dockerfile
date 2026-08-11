@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 
 COPY --from=build /app/publish .
 
+# Geo country database (DB-IP Country Lite, CC-BY)
+COPY dbip-country-lite.mmdb /app/dbip-country-lite.mmdb
+
 RUN mkdir -p /app/logs
 
 EXPOSE 50001/udp
