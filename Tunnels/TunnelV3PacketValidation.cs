@@ -6,13 +6,17 @@ namespace CnCNetServer.Tunnels;
 /// </summary>
 internal static class TunnelV3PacketValidation
 {
-    // Magic bytes for negotiation packets: "EJEJEJ"
-    private static readonly byte[] MagicBytes = [0x45, 0x4A, 0x45, 0x4A, 0x45, 0x4A];
+    // Magic bytes for negotiation packets. Must match the client's V3TunnelCommunicator.
+    private static readonly byte[] MagicBytes = "CNCNET"u8.ToArray();
 
     private const int HeaderSize = 8;
     private const int PingPacketSize = 50;
     private const int RegistrationPacketSize = 8;
     private const int MinNegotiationPacketSize = 15; // 8 (header) + 6 (magic) + 1 (type)
+
+    // Smallest game data packet worth relaying: 8 (header) + 4, the minimum the client's game
+    // bridge will forward. Anything smaller carries no addressable payload.
+    private const int MinGameDataPacketSize = 12;
 
     /// <summary>
     /// Gets or sets whether packet validation is enabled.
@@ -59,8 +63,8 @@ internal static class TunnelV3PacketValidation
             // Game data packet (size > 8, no magic bytes)
             if (size > HeaderSize && !HasMagicBytes(buffer))
             {
-                // Suspicious: between 9-14 bytes without magic bytes
-                if (size >= 9 && size < MinNegotiationPacketSize)
+                // Too small to be game data the client would have sent.
+                if (size < MinGameDataPacketSize)
                     return false;
 
                 return true;
@@ -73,6 +77,14 @@ internal static class TunnelV3PacketValidation
         // Doesn't match any valid format
         return false;
     }
+
+    /// <summary>
+    /// Whether a relay packet is a client-to-client negotiation packet within
+    /// <paramref name="maxSize"/> bytes. Used by matchmaking servers, which relay the tunnel list
+    /// exchange and nothing else - no game data, at any size.
+    /// </summary>
+    public static bool IsNegotiationPacket(ReadOnlySpan<byte> buffer, int maxSize)
+        => buffer.Length >= MinNegotiationPacketSize && buffer.Length <= maxSize && HasMagicBytes(buffer);
 
     /// <summary>
     /// Checks if the buffer contains the magic bytes at the expected position.

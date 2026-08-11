@@ -9,6 +9,12 @@ namespace CnCNetServer.Security;
 /// Manages IP-based security including rate limiting, blacklisting, and DDoS protection.
 /// Thread-safe for concurrent access from multiple tunnel handlers.
 /// </summary>
+/// <remarks>
+/// Every method a tunnel calls here sits on the per-packet path, so all of them are allocation-free
+/// and none scale with the number of tracked IPs or blacklist entries. Addresses are keyed by their
+/// numeric IPv4 form to keep that true - string keys would mean allocating and hashing a string for
+/// every packet received.
+/// </remarks>
 public sealed class IpSecurityManager : IDisposable
 {
     private readonly ILogger _logger;
@@ -16,18 +22,19 @@ public sealed class IpSecurityManager : IDisposable
     private readonly Timer _cleanupTimer;
     private readonly Timer _blacklistRefreshTimer;
 
-    // Rate limiting: tracks request counts per IP (key = IP string, avoids hash collisions)
-    private readonly ConcurrentDictionary<string, RateLimitEntry> _rateLimits = new();
+    // Rate limiting: tracks request counts per IP, keyed by numeric IPv4 address.
+    private readonly ConcurrentDictionary<uint, RateLimitEntry> _rateLimits = new();
 
-    // Local blacklist: IPs that exceeded limits (key = IP string)
-    private readonly ConcurrentDictionary<string, DateTime> _localBlacklist = new();
+    // Local blacklist: IPs that exceeded limits.
+    private readonly ConcurrentDictionary<uint, DateTime> _localBlacklist = new();
 
-    // External blacklists: swapped atomically on each refresh
-    private volatile ConcurrentDictionary<string, bool> _externalBlacklist = new();
-    private volatile List<(uint Network, uint Mask)> _networkBlacklist = [];
+    // External blacklists, single addresses and CIDR networks alike, as one searchable range set.
+    // Replaced wholesale on refresh; readers take the reference once and never see a partial swap.
+    private volatile IpRangeSet _externalBlacklist = IpRangeSet.Empty;
 
-    // Lock only for network blacklist reads during refresh swap
-    private readonly ReaderWriterLockSlim _networkLock = new();
+    // Tracks _rateLimits.Count without paying for it. ConcurrentDictionary.Count takes every one
+    // of the dictionary's internal locks, and this is read on the ping path for the global cap.
+    private int _trackedIpCount;
 
     // Statistics
     private long _totalConnections;
@@ -59,31 +66,30 @@ public sealed class IpSecurityManager : IDisposable
     /// Checks if an IP address is allowed to connect (not blacklisted).
     /// </summary>
     public bool IsConnectionAllowed(IPAddress address)
+        => IpRangeSet.TryGetKey(address, out var key) ? IsConnectionAllowed(key) : true;
+
+    /// <summary>
+    /// Checks if an address, already in numeric form, is allowed to connect. Preferred on packet
+    /// paths that have decoded the address themselves.
+    /// </summary>
+    public bool IsConnectionAllowed(uint address)
     {
         Interlocked.Increment(ref _totalConnections);
-        var ipKey = address.ToString();
 
         // Check local blacklist
-        if (_localBlacklist.TryGetValue(ipKey, out var expiry))
+        if (_localBlacklist.TryGetValue(address, out var expiry))
         {
             if (DateTime.UtcNow < expiry)
             {
                 Interlocked.Increment(ref _blockedByLocalBlacklist);
                 return false;
             }
-            _localBlacklist.TryRemove(ipKey, out _);
+
+            _localBlacklist.TryRemove(address, out _);
         }
 
         // Check external blacklist (snapshot - safe for concurrent reads)
-        var externalBlacklist = _externalBlacklist;
-        if (externalBlacklist.ContainsKey(ipKey))
-        {
-            Interlocked.Increment(ref _blockedByExternalBlacklist);
-            return false;
-        }
-
-        // Check CIDR network blacklist
-        if (IsInNetworkBlacklist(address))
+        if (_externalBlacklist.Contains(address))
         {
             Interlocked.Increment(ref _blockedByExternalBlacklist);
             return false;
@@ -96,21 +102,41 @@ public sealed class IpSecurityManager : IDisposable
     /// Checks if a ping request from an IP is within rate limits.
     /// </summary>
     public bool IsPingAllowed(IPAddress address, int maxPerIp, int maxGlobal)
+        => !IpRangeSet.TryGetKey(address, out var key) || IsPingAllowed(key, maxPerIp, maxGlobal);
+
+    /// <inheritdoc cref="IsPingAllowed(IPAddress, int, int)"/>
+    public bool IsPingAllowed(uint address, int maxPerIp, int maxGlobal)
     {
-        if (_rateLimits.Count >= maxGlobal)
+        if (Volatile.Read(ref _trackedIpCount) >= maxGlobal)
             return false;
 
-        var entry = _rateLimits.GetOrAdd(address.ToString(), _ => new RateLimitEntry());
-        return entry.IncrementPingCount() <= maxPerIp;
+        return GetOrAddRateLimitEntry(address).IncrementPingCount() <= maxPerIp;
     }
 
     /// <summary>
-    /// Tracks a connection for rate limiting purposes.
+    /// Tracks a connection for rate limiting purposes. Returns false if the IP is already at
+    /// <paramref name="maxConnectionsPerIp"/>, in which case nothing is tracked and the caller
+    /// must not create a session.
     /// </summary>
+    /// <remarks>
+    /// The count is rolled back when the limit is exceeded, because leaving it raised would be
+    /// self-reinforcing: a rejected client never gets a mapping, so <see cref="ReleaseConnection"/>
+    /// never runs for it and each retry pushes the count further past the limit. The IP could then
+    /// never connect again, since <see cref="CleanupExpiredEntries"/> only evicts entries at zero.
+    /// </remarks>
     public bool TrackConnection(IPAddress address, int maxConnectionsPerIp)
+        => !IpRangeSet.TryGetKey(address, out var key) || TrackConnection(key, maxConnectionsPerIp);
+
+    /// <inheritdoc cref="TrackConnection(IPAddress, int)"/>
+    public bool TrackConnection(uint address, int maxConnectionsPerIp)
     {
-        var entry = _rateLimits.GetOrAdd(address.ToString(), _ => new RateLimitEntry());
-        return entry.IncrementConnectionCount() <= maxConnectionsPerIp;
+        var entry = GetOrAddRateLimitEntry(address);
+
+        if (entry.IncrementConnectionCount() <= maxConnectionsPerIp)
+            return true;
+
+        entry.DecrementConnectionCount();
+        return false;
     }
 
     /// <summary>
@@ -118,8 +144,38 @@ public sealed class IpSecurityManager : IDisposable
     /// </summary>
     public void ReleaseConnection(IPAddress address)
     {
-        if (_rateLimits.TryGetValue(address.ToString(), out var entry))
+        if (IpRangeSet.TryGetKey(address, out var key))
+            ReleaseConnection(key);
+    }
+
+    /// <inheritdoc cref="ReleaseConnection(IPAddress)"/>
+    public void ReleaseConnection(uint address)
+    {
+        if (_rateLimits.TryGetValue(address, out var entry))
             entry.DecrementConnectionCount();
+    }
+
+    /// <summary>
+    /// Looks up an IP's rate limit entry, creating it if needed, and keeps
+    /// <see cref="_trackedIpCount"/> in step with the dictionary.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <c>GetOrAdd</c> with a factory: that factory can run more than once under
+    /// contention, which would over-count the tracked IPs and slowly close the global ping cap.
+    /// </remarks>
+    private RateLimitEntry GetOrAddRateLimitEntry(uint address)
+    {
+        if (_rateLimits.TryGetValue(address, out var entry))
+            return entry;
+
+        var created = new RateLimitEntry();
+        if (_rateLimits.TryAdd(address, created))
+        {
+            Interlocked.Increment(ref _trackedIpCount);
+            return created;
+        }
+
+        return _rateLimits.TryGetValue(address, out entry) ? entry : created;
     }
 
     /// <summary>
@@ -127,8 +183,11 @@ public sealed class IpSecurityManager : IDisposable
     /// </summary>
     public void AddToBlacklist(IPAddress address)
     {
+        if (!IpRangeSet.TryGetKey(address, out var key))
+            return;
+
         var expiry = DateTime.UtcNow.AddHours(_options.IpBlacklistDurationHours);
-        _localBlacklist[address.ToString()] = expiry;
+        _localBlacklist[key] = expiry;
         _logger.Warning("IP {IP} added to local blacklist until {Expiry}", IpAnonymizer.Anonymize(address), expiry);
     }
 
@@ -142,7 +201,7 @@ public sealed class IpSecurityManager : IDisposable
             .Where(kvp => kvp.Value > now)
             .Select(kvp => new BlockedIpInfo
             {
-                IpAddress = kvp.Key,
+                IpAddress = IpRangeSet.ToDisplayString(kvp.Key),
                 ExpiresAt = kvp.Value,
                 RemainingMinutes = (int)(kvp.Value - now).TotalMinutes
             })
@@ -154,10 +213,10 @@ public sealed class IpSecurityManager : IDisposable
     /// </summary>
     public bool RemoveFromBlacklist(string ipAddress)
     {
-        if (!IPAddress.TryParse(ipAddress, out _))
+        if (!IPAddress.TryParse(ipAddress, out var parsed) || !IpRangeSet.TryGetKey(parsed, out var key))
             return false;
 
-        var removed = _localBlacklist.TryRemove(ipAddress, out _);
+        var removed = _localBlacklist.TryRemove(key, out _);
         if (removed)
             _logger.Warning("IP {IP} manually removed from local blacklist", IpAnonymizer.Anonymize(ipAddress));
         return removed;
@@ -177,11 +236,13 @@ public sealed class IpSecurityManager : IDisposable
     /// </summary>
     public SecurityStatistics GetStatistics()
     {
+        var externalBlacklist = _externalBlacklist;
+
         return new SecurityStatistics
         {
-            TrackedIps = _rateLimits.Count,
+            TrackedIps = Volatile.Read(ref _trackedIpCount),
             LocalBlacklistCount = _localBlacklist.Count,
-            ExternalBlacklistCount = _externalBlacklist.Count + GetNetworkBlacklistCount(),
+            ExternalBlacklistCount = externalBlacklist.AddressCount + externalBlacklist.NetworkCount,
             TotalConnections = Interlocked.Read(ref _totalConnections),
             BlockedByLocalBlacklist = Interlocked.Read(ref _blockedByLocalBlacklist),
             BlockedByExternalBlacklist = Interlocked.Read(ref _blockedByExternalBlacklist)
@@ -199,9 +260,8 @@ public sealed class IpSecurityManager : IDisposable
 
         _logger.Information("Refreshing external IP blacklists...");
 
-        // Build new collections – old ones remain fully active during refresh
-        var newExternalBlacklist = new ConcurrentDictionary<string, bool>();
-        var newNetworkBlacklist = new List<(uint Network, uint Mask)>();
+        // Build the new set – the old one remains fully active until the swap at the end.
+        var ranges = new List<(uint Start, uint End)>();
 
         var totalIps = 0;
         var totalNetworks = 0;
@@ -214,7 +274,7 @@ public sealed class IpSecurityManager : IDisposable
             try
             {
                 var content = await httpClient.GetStringAsync(url);
-                var (ips, networks) = ParseBlacklist(content, newExternalBlacklist, newNetworkBlacklist);
+                var (ips, networks) = ParseBlacklist(content, ranges);
                 totalIps += ips;
                 totalNetworks += networks;
                 successfulSources++;
@@ -225,27 +285,24 @@ public sealed class IpSecurityManager : IDisposable
             }
         }
 
-        // Atomic swap – readers instantly see the new complete list
-        _networkLock.EnterWriteLock();
-        try
+        // Every source failed – keep what we already have rather than dropping protection.
+        if (successfulSources == 0)
         {
-            _externalBlacklist = newExternalBlacklist;
-            _networkBlacklist = newNetworkBlacklist;
+            _logger.Warning("No external blacklist source could be reached; keeping the previous list");
+            return;
         }
-        finally
-        {
-            _networkLock.ExitWriteLock();
-        }
+
+        var newBlacklist = IpRangeSet.Build(ranges, totalIps, totalNetworks);
+
+        // Atomic swap – readers instantly see the new complete list.
+        _externalBlacklist = newBlacklist;
 
         _logger.Information(
-            "External blacklist loaded: {IpCount} IPs, {NetworkCount} networks from {Success}/{Total} sources",
-            totalIps, totalNetworks, successfulSources, _options.ExternalBlacklistUrls.Length);
+            "External blacklist loaded: {IpCount} IPs, {NetworkCount} networks from {Success}/{Total} sources ({RangeCount} merged ranges)",
+            totalIps, totalNetworks, successfulSources, _options.ExternalBlacklistUrls.Length, newBlacklist.RangeCount);
     }
 
-    private static (int ips, int networks) ParseBlacklist(
-        string content,
-        ConcurrentDictionary<string, bool> ipDict,
-        List<(uint, uint)> networkList)
+    private static (int ips, int networks) ParseBlacklist(string content, List<(uint Start, uint End)> ranges)
     {
         var ips = 0;
         var networks = 0;
@@ -258,15 +315,16 @@ public sealed class IpSecurityManager : IDisposable
 
             if (trimmed.Contains('/'))
             {
-                if (TryParseCidr(trimmed, out var network, out var mask))
+                if (TryParseCidr(trimmed, out var start, out var end))
                 {
-                    networkList.Add((network, mask));
+                    ranges.Add((start, end));
                     networks++;
                 }
             }
-            else if (IPAddress.TryParse(trimmed, out var address))
+            else if (IPAddress.TryParse(trimmed, out var address) && IpRangeSet.TryGetKey(address, out var key))
             {
-                ipDict[address.ToString()] = true;
+                // A single address is just a one-entry range, so it shares the same lookup.
+                ranges.Add((key, key));
                 ips++;
             }
         }
@@ -274,46 +332,34 @@ public sealed class IpSecurityManager : IDisposable
         return (ips, networks);
     }
 
-    private static bool TryParseCidr(string cidr, out uint network, out uint mask)
+    /// <summary>
+    /// Parses a CIDR block into the inclusive numeric range it covers.
+    /// </summary>
+    private static bool TryParseCidr(string cidr, out uint start, out uint end)
     {
-        network = 0;
-        mask = 0;
+        start = 0;
+        end = 0;
 
-        var parts = cidr.Split('/');
-        if (parts.Length != 2) return false;
-
-        if (!IPAddress.TryParse(parts[0], out var address) ||
-            address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+        var separator = cidr.IndexOf('/');
+        if (separator < 0)
             return false;
 
-        if (!int.TryParse(parts[1], out var prefixLength) || prefixLength < 0 || prefixLength > 32)
+        // Sliced rather than Split so parsing a blacklist of tens of thousands of lines does not
+        // allocate an array per line.
+        var addressPart = cidr.AsSpan(0, separator).Trim();
+        var prefixPart = cidr.AsSpan(separator + 1).Trim();
+
+        if (!IPAddress.TryParse(addressPart, out var address) || !IpRangeSet.TryGetKey(address, out var network))
             return false;
 
-        var bytes = address.GetAddressBytes();
-        network = (uint)((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
-        mask = prefixLength == 0 ? 0 : uint.MaxValue << (32 - prefixLength);
+        if (!int.TryParse(prefixPart, out var prefixLength) || prefixLength < 0 || prefixLength > 32)
+            return false;
+
+        var mask = prefixLength == 0 ? 0u : uint.MaxValue << (32 - prefixLength);
+        start = network & mask;
+        end = start | ~mask;
         return true;
     }
-
-    private bool IsInNetworkBlacklist(IPAddress address)
-    {
-        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
-            return false;
-
-        var bytes = address.GetAddressBytes();
-        var ip = (uint)((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
-
-        // Read snapshot – the list reference is volatile, no lock needed for reads
-        var networkBlacklist = _networkBlacklist;
-        foreach (var (network, mask) in networkBlacklist)
-        {
-            if ((ip & mask) == (network & mask))
-                return true;
-        }
-        return false;
-    }
-
-    private int GetNetworkBlacklistCount() => _networkBlacklist.Count;
 
     private void CleanupExpiredEntries(object? state)
     {
@@ -328,8 +374,11 @@ public sealed class IpSecurityManager : IDisposable
         var cutoff = now.AddMinutes(-5);
         foreach (var kvp in _rateLimits)
         {
-            if (kvp.Value.LastActivity < cutoff && kvp.Value.ConnectionCount == 0)
-                _rateLimits.TryRemove(kvp.Key, out _);
+            if (kvp.Value.LastActivity < cutoff && kvp.Value.ConnectionCount == 0 &&
+                _rateLimits.TryRemove(kvp.Key, out _))
+            {
+                Interlocked.Decrement(ref _trackedIpCount);
+            }
         }
     }
 
@@ -337,7 +386,6 @@ public sealed class IpSecurityManager : IDisposable
     {
         _cleanupTimer.Dispose();
         _blacklistRefreshTimer.Dispose();
-        _networkLock.Dispose();
     }
 }
 
@@ -352,7 +400,23 @@ internal sealed class RateLimitEntry
     public int IncrementPingCount() { LastActivity = DateTime.UtcNow; return Interlocked.Increment(ref _pingCount); }
     public void ResetPingCount() => Interlocked.Exchange(ref _pingCount, 0);
     public int IncrementConnectionCount() { LastActivity = DateTime.UtcNow; return Interlocked.Increment(ref _connectionCount); }
-    public void DecrementConnectionCount() => Interlocked.Decrement(ref _connectionCount);
+
+    /// <summary>
+    /// Releases one tracked connection, never dropping below zero. The floor matters because a
+    /// negative count would both hand the IP extra headroom and make the entry permanently
+    /// ineligible for cleanup, which only evicts entries sitting at exactly zero.
+    /// </summary>
+    public void DecrementConnectionCount()
+    {
+        int current;
+        do
+        {
+            current = Volatile.Read(ref _connectionCount);
+            if (current <= 0)
+                return;
+        }
+        while (Interlocked.CompareExchange(ref _connectionCount, current - 1, current) != current);
+    }
 }
 
 public sealed class SecurityStatistics
