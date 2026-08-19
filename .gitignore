@@ -221,3 +221,7 @@ backups/
 *.db
 *.sqlite
 *.sqlite3
+
+# Country database (DB-IP Country Lite / GeoLite2) - fetched separately, not redistributed here
+dbip-country-lite.mmdb
+*.mmdb

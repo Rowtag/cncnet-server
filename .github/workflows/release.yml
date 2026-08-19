@@ -43,51 +43,43 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          dotnet-quality: 'preview'
 
       - name: Restore dependencies
         run: dotnet restore CnCNetServer.csproj
 
-      - name: Publish V3 only
-        run: |
-          dotnet publish CnCNetServer.csproj -c Release -r ${{ matrix.rid }} -o publish/V3
-
-      - name: Publish V2+V3
-        run: |
-          dotnet publish CnCNetServer.csproj -c V2AndV3Release -r ${{ matrix.rid }} -o publish/V2+V3
+      # V2 and V3 are switched at runtime through appsettings.json, so a single
+      # Release build covers both. There is no compile-time variant.
+      - name: Publish
+        run: dotnet publish CnCNetServer.csproj -c Release -r ${{ matrix.rid }} -o publish/
 
       - name: Get version from tag
         id: version
         shell: bash
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Create archives (Linux/macOS)
+      - name: Create archive (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
-          cd publish/V3
-          zip -r ../../cncnet-server-${{ steps.version.outputs.VERSION }}-net10.0-V3-${{ matrix.name }}.zip .
-          cd ../V2+V3
-          zip -r ../../cncnet-server-${{ steps.version.outputs.VERSION }}-net10.0-V2+V3-${{ matrix.name }}.zip .
+          cd publish
+          zip -r ../cncnet-server-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.zip .
 
-      - name: Create archives (Windows)
+      - name: Create archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path publish/V3/* -DestinationPath cncnet-server-${{ steps.version.outputs.VERSION }}-net10.0-V3-${{ matrix.name }}.zip
-          Compress-Archive -Path publish/V2+V3/* -DestinationPath cncnet-server-${{ steps.version.outputs.VERSION }}-net10.0-V2+V3-${{ matrix.name }}.zip
+          Compress-Archive -Path publish/* -DestinationPath cncnet-server-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}.zip
 
-      - name: Generate SHA256 checksums (Linux/macOS)
+      - name: Generate SHA256 checksum (Linux/macOS)
         if: runner.os != 'Windows'
-        run: |
-          for file in cncnet-server-*.zip; do
-            sha256sum "$file" >> checksums-${{ matrix.name }}.txt
-          done
+        run: sha256sum cncnet-server-*.zip > checksums-${{ matrix.name }}.txt
 
-      - name: Generate SHA256 checksums (Windows)
+      - name: Generate SHA256 checksum (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Get-FileHash cncnet-server-*.zip -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } | Out-File -FilePath checksums-${{ matrix.name }}.txt -Encoding utf8
+          Get-FileHash cncnet-server-*.zip -Algorithm SHA256 | ForEach-Object {
+            "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)"
+          } | Out-File -FilePath checksums-${{ matrix.name }}.txt -Encoding utf8
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

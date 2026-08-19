@@ -17,7 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 COPY --from=build /app/publish .
 
 # Geo country database (DB-IP Country Lite, CC-BY)
-COPY dbip-country-lite.mmdb /app/dbip-country-lite.mmdb
+# Optional country database (DB-IP Country Lite). The bracket makes the pattern a
+# glob, so the build still succeeds when the file is not present in the context.
+COPY dbip-country-lite.mmd[b] /app/
 
 RUN mkdir -p /app/logs
 

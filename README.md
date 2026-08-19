@@ -12,7 +12,8 @@ A high-performance UDP relay server for Command & Conquer games on CnCNet, suppo
 4. [Windows](#windows)
 5. [Matchmaking Server](#matchmaking-server)
 6. [Configuration Reference](#configuration-reference)
-7. [Web Dashboard](#web-dashboard)
+7. [Country Lookup](#country-lookup-optional)
+8. [Web Dashboard](#web-dashboard)
 
 ---
 
@@ -398,6 +399,34 @@ It can also be changed live from the dashboard without restarting.
 
 ---
 
+## Country Lookup (optional)
+
+The dashboard can show the country of each connected client. The lookup runs against a local
+database file and only during the status poll, over the client set the tunnel already holds —
+there is no per-packet cost, and the raw address is never stored.
+
+The database is **not** shipped with this repository. Download the free
+[DB-IP Country Lite](https://db-ip.com/db/download/ip-to-country-lite) database (or a MaxMind
+GeoLite2 Country database) and place it where the server can read it:
+
+```bash
+# Docker: put it next to your docker-compose.yml and mount it
+volumes:
+  - ./dbip-country-lite.mmdb:/app/dbip-country-lite.mmdb:ro
+
+# Binary install: place it next to the executable
+/opt/cncnet-server/dbip-country-lite.mmdb
+```
+
+Without the file the server starts normally and simply reports `??` as the country. If you
+build the Docker image yourself, dropping the file into the build context is enough — it is
+picked up automatically and the build works with or without it.
+
+DB-IP Country Lite is licensed CC-BY 4.0 and requires attribution to
+[DB-IP](https://db-ip.com) wherever the data is displayed.
+
+---
+
 ## Web Dashboard
 
 Accessible at `http://<your-server>:1337` (port configurable via `WebMonitor.Port`).
@@ -423,6 +452,7 @@ GPL-3.0 — see [LICENSE](LICENSE) for details.
 ## Links
 
 - [CnCNet Website](https://cncnet.org)
+- [DB-IP Country Lite](https://db-ip.com/db/download/ip-to-country-lite) — country data, CC-BY 4.0
 
 ---
 
