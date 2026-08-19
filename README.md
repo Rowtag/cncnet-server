@@ -85,6 +85,21 @@ ufw allow 1337/tcp
 ```
 
 > **Note:** If using UFW with Docker, ensure `/etc/default/ufw` has `DEFAULT_FORWARD_POLICY="ACCEPT"` and restart Docker after any UFW reload: `systemctl restart docker`
+>
+> **UFW does not restrict published Docker ports.** Docker inserts its own rules ahead of UFW,
+> so the ports above are reachable from anywhere the moment the container starts, and a rule
+> like `ufw deny 1337/tcp` or `ufw allow from <ip> to any port 1337` has no effect on them.
+> To actually limit access — the dashboard on 1337 above all — write the rule into the
+> `DOCKER-USER` chain instead:
+>
+> ```bash
+> iptables -I DOCKER-USER -p tcp --dport 1337 -s <your-ip> -j ACCEPT
+> iptables -I DOCKER-USER -p tcp --dport 1337 -j DROP
+> ```
+>
+> These rules are lost on reboot and when Docker restarts, so persist them with a small systemd
+> unit. Always verify from a host that is **not** on the allow list, otherwise you are testing
+> nothing.
 
 ---
 
