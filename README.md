@@ -255,9 +255,40 @@ matchmaking existed ignore it entirely and can never pick it to host a game.
 Matchmaking is a mode of the V3 tunnel, and a process has one V3 listener — so a server that does
 both roles runs the binary **twice**, from two directories, with two configs.
 
+### Docker
+
+`docker-compose.matchmaking.yml` in this repository is the second instance, ready to run. Put it
+in its own directory next to your game tunnel:
+
+```bash
+mkdir -p /opt/cncnet-matchmaking && cd /opt/cncnet-matchmaking
+curl -O https://raw.githubusercontent.com/Rowtag/cncnet-server/master/docker-compose.matchmaking.yml
+curl -o .env https://raw.githubusercontent.com/Rowtag/cncnet-server/master/.env.matchmaking.example
+nano .env && chmod 600 .env
+docker compose -f docker-compose.matchmaking.yml up -d
+```
+
+The `.env` carries the server name and both passwords, so nothing secret sits in the compose file.
+`GEO_DB` points at the country database the game tunnel already uses — the two instances share one
+file. Everything else is already set: V3 on 50002, V2 and STUN off so they cannot collide with the
+first instance, the dashboard on 1338, and `mem_limit`/`cpu_shares` low enough that the game tunnel
+wins when both want the machine.
+
+Open UDP 50002, and TCP 1338 only if you want the second dashboard reachable — mind the note in the
+firewall section, published Docker ports ignore UFW. Then confirm the role took:
+
+```bash
+docker logs cncnet-matchmaking | grep "matchmaking mode"
+# V3 Tunnel started on UDP port 50002 in matchmaking mode (max 2000 clients, 30s timeout, 32 per IP)
+```
+
+If that line says anything else, the process came up as a plain relay and the master list will
+advertise it as one.
+
 ### Bing
 
-Copy your existing install to a second directory:
+Not using Docker? The same thing by hand, in three steps. Copy your existing install to a second
+directory:
 
 ```bash
 cp -r /opt/cncnet-server /opt/cncnet-server-matchmaking

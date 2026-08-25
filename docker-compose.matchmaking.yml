@@ -1,0 +1,57 @@
+# Second instance: the V3 tunnel in its matchmaking role.
+# Run this from its own directory, alongside the game tunnel from docker-compose.yml.
+# The role is process-wide: this process relays only the negotiation exchange and drops
+# game traffic, so never switch a live game tunnel over - always run a second container.
+#
+# Copy .env.matchmaking.example to .env in that directory, fill it in, chmod 600.
+
+services:
+  cncnet-matchmaking:
+    image: ghcr.io/rowtag/cncnet-server:4.2.0
+    container_name: cncnet-matchmaking
+    restart: unless-stopped
+
+    # Server name and both passwords come from .env - never put them here.
+    env_file: .env
+
+    environment:
+      CNCNET_TUNNELV3__ENABLED: "true"
+      CNCNET_TUNNELV3__PORT: "50002"
+      CNCNET_TUNNELV3__MATCHMAKING__ENABLED: "true"
+      CNCNET_TUNNELV3__MATCHMAKING__CLIENTTIMEOUT: "30"
+      CNCNET_TUNNELV3__MATCHMAKING__IPLIMIT: "32"
+      CNCNET_TUNNELV3__RELAYPACKETCOPIES: "1"
+
+      # The game tunnel already owns V2 on 50000 and STUN on 8054/3478.
+      # Binding them a second time kills startup.
+      CNCNET_TUNNELV2__ENABLED: "false"
+      CNCNET_PEERTOPEER__ENABLED: "false"
+
+      # Its own dashboard, because 1337 belongs to the game tunnel.
+      CNCNET_WEBMONITOR__ENABLED: "true"
+      CNCNET_WEBMONITOR__PORT: "1338"
+
+      CNCNET_SECURITY__MAXPINGSGLOBAL: "20000"
+      CNCNET_MASTERSERVER__ENABLED: "true"
+
+    volumes:
+      - ./logs:/app/logs
+      # Optional country database, shared with the game tunnel. Point GEO_DB at the file;
+      # if the path does not exist Docker creates a directory there and country lookup
+      # silently stays off.
+      - ${GEO_DB:-./dbip-country-lite.mmdb}:/app/dbip-country-lite.mmdb:ro
+
+    ports:
+      - "50002:50002/udp"
+      - "1338:1338/tcp"
+
+    # The game tunnel takes precedence when both want the machine.
+    mem_limit: 384m
+    cpu_shares: 512
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1338/json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
